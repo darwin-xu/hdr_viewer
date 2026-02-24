@@ -4,6 +4,7 @@ struct FilmstripView: View {
     let photos: [PhotoItem]
     let selected: PhotoItem?
     let onSelect: (PhotoItem) -> Void
+    @StateObject private var thumbnailProvider = ThumbnailProvider()
 
     var body: some View {
         ScrollView(.horizontal) {
@@ -14,9 +15,17 @@ struct FilmstripView: View {
                             RoundedRectangle(cornerRadius: 6)
                                 .fill(Color.secondary.opacity(0.12))
 
-                            Image(systemName: "photo")
-                                .font(.headline)
-                                .foregroundStyle(.secondary)
+                            if let image = thumbnailProvider.thumbnails[photo.url] {
+                                Image(nsImage: image)
+                                    .resizable()
+                                    .aspectRatio(contentMode: .fill)
+                                    .frame(width: 92, height: 56)
+                                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                            } else {
+                                Image(systemName: "photo")
+                                    .font(.headline)
+                                    .foregroundStyle(.secondary)
+                            }
                         }
                         .frame(width: 92, height: 56)
 
@@ -32,6 +41,9 @@ struct FilmstripView: View {
                     )
                     .onTapGesture {
                         onSelect(photo)
+                    }
+                    .onAppear {
+                        thumbnailProvider.requestThumbnail(for: photo.url)
                     }
                 }
             }

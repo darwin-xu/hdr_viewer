@@ -61,6 +61,19 @@ struct ContentView: View {
         } message: {
             Text(viewModel.lastErrorMessage ?? "Unknown error")
         }
+        .onChange(of: viewModel.zoomCommand) { _, command in
+            guard let command else { return }
+            switch command {
+            case .zoomIn:
+                zoomScale = min(5.0, zoomScale + 0.1)
+            case .zoomOut:
+                zoomScale = max(0.1, zoomScale - 0.1)
+            case .reset:
+                zoomScale = 1.0
+                panOffset = .zero
+            }
+            viewModel.zoomCommand = nil
+        }
     }
 
     private var topBar: some View {
