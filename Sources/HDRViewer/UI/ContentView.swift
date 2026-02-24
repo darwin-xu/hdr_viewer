@@ -8,15 +8,7 @@ struct ContentView: View {
 
     var body: some View {
         NavigationSplitView {
-            ThumbnailGridView(
-                photos: viewModel.photos,
-                selected: viewModel.currentPhoto,
-                onSelect: { item in
-                    zoomScale = 1.0
-                    panOffset = .zero
-                    viewModel.selectPhoto(item)
-                }
-            )
+            FolderTreeSidebarView(viewModel: viewModel)
             .frame(minWidth: 240)
         } detail: {
             VStack(spacing: 0) {
@@ -73,8 +65,8 @@ struct ContentView: View {
 
     private var topBar: some View {
         HStack {
-            Button("Open Folder") {
-                viewModel.openFolderPicker()
+            Button("Add Start Point") {
+                viewModel.addStartPointPicker()
             }
 
             if let folder = viewModel.currentFolderURL {

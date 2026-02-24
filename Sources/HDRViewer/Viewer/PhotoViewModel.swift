@@ -8,6 +8,8 @@ final class PhotoViewModel: ObservableObject {
     @Published private(set) var currentImage: NSImage?
     @Published private(set) var currentMetadata: PhotoMetadata?
     @Published private(set) var currentFolderURL: URL?
+    @Published private(set) var treeStartPoints: [URL] = []
+    @Published private(set) var selectedTreeFolderURL: URL?
     @Published var lastErrorMessage: String?
 
     private let folderIndex: FolderIndex
@@ -32,16 +34,44 @@ final class PhotoViewModel: ObservableObject {
         return photos[currentIndex]
     }
 
-    func openFolderPicker() {
+    func addStartPointPicker() {
         let panel = NSOpenPanel()
         panel.canChooseFiles = false
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
-        panel.prompt = "Open"
+        panel.prompt = "Add"
 
         if panel.runModal() == .OK, let folder = panel.url {
-            loadFolder(folder)
+            addStartPoint(folder)
         }
+    }
+
+    func addStartPoint(_ folderURL: URL) {
+        if !treeStartPoints.contains(folderURL) {
+            treeStartPoints.append(folderURL)
+            treeStartPoints.sort {
+                $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+            }
+        }
+
+        selectFolderFromTree(folderURL)
+    }
+
+    func selectFolderFromTree(_ folderURL: URL) {
+        selectedTreeFolderURL = folderURL
+        loadFolder(folderURL)
+    }
+
+    func subfolders(for folderURL: URL) -> [URL] {
+        folderIndex.listSubfolders(in: folderURL)
+    }
+
+    func hasSubfolders(for folderURL: URL) -> Bool {
+        folderIndex.hasSubfolders(in: folderURL)
+    }
+
+    func openFolderPicker() {
+        addStartPointPicker()
     }
 
     func loadFolder(_ folderURL: URL) {
