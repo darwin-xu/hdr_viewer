@@ -2,6 +2,12 @@ import AppKit
 import CoreImage
 import Foundation
 
+enum ZoomCommand {
+    case zoomIn
+    case zoomOut
+    case reset
+}
+
 @MainActor
 final class PhotoViewModel: ObservableObject {
     private static let startPointDefaultsKey = "hdrViewer.treeStartPoints"
@@ -14,6 +20,7 @@ final class PhotoViewModel: ObservableObject {
     @Published private(set) var currentFolderURL: URL?
     @Published private(set) var treeStartPoints: [URL] = []
     @Published private(set) var selectedTreeFolderURL: URL?
+    @Published var zoomCommand: ZoomCommand?
     @Published var lastErrorMessage: String?
 
     private let folderIndex: FolderIndex
@@ -81,6 +88,18 @@ final class PhotoViewModel: ObservableObject {
 
     func openFolderPicker() {
         addStartPointPicker()
+    }
+
+    func zoomInRequest() {
+        zoomCommand = .zoomIn
+    }
+
+    func zoomOutRequest() {
+        zoomCommand = .zoomOut
+    }
+
+    func resetZoomRequest() {
+        zoomCommand = .reset
     }
 
     func loadFolder(_ folderURL: URL) {
