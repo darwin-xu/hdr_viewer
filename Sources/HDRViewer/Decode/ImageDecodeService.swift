@@ -20,11 +20,48 @@ final class ImageDecodeService {
     private let ciContext = CIContext(options: nil)
 
     func decodeImage(from url: URL, maxPixelSize: Int? = nil) throws -> NSImage {
+        if maxPixelSize == nil {
+            let ciImage = try decodeCIImage(from: url)
+            return try makeNSImage(from: ciImage)
+        }
+
         let ext = url.pathExtension.lowercased()
         if isRAW(ext: ext) {
             return try decodeRAW(from: url)
         }
         return try decodeRaster(from: url, maxPixelSize: maxPixelSize)
+    }
+
+    func decodeCIImage(from url: URL) throws -> CIImage {
+        let ext = url.pathExtension.lowercased()
+        if isRAW(ext: ext) {
+            guard let rawFilter = CIFilter(imageURL: url) else {
+                throw ImageDecodeError.failedToDecodeImage
+            }
+
+            rawFilter.setDefaults()
+
+            guard let outputImage = rawFilter.outputImage else {
+                throw ImageDecodeError.failedToDecodeImage
+            }
+
+            return outputImage
+        }
+
+        let hdrOptions: [CIImageOption: Any] = [
+            .applyOrientationProperty: true,
+            .expandToHDR: true
+        ]
+
+        if let image = CIImage(contentsOf: url, options: hdrOptions) {
+            return image
+        }
+
+        if let fallbackImage = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) {
+            return fallbackImage
+        }
+
+        throw ImageDecodeError.failedToDecodeImage
     }
 
     private func decodeRaster(from url: URL, maxPixelSize: Int?) throws -> NSImage {
@@ -50,20 +87,18 @@ final class ImageDecodeService {
     }
 
     private func decodeRAW(from url: URL) throws -> NSImage {
-        guard let rawFilter = CIFilter(imageURL: url) else {
-            throw ImageDecodeError.failedToDecodeImage
-        }
-
-        rawFilter.setDefaults()
-
-        guard let outputImage = rawFilter.outputImage else {
-            throw ImageDecodeError.failedToDecodeImage
-        }
-
+        let outputImage = try decodeCIImage(from: url)
         guard let cgImage = ciContext.createCGImage(outputImage, from: outputImage.extent) else {
             throw ImageDecodeError.failedToDecodeImage
         }
 
+        return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+    }
+
+    private func makeNSImage(from ciImage: CIImage) throws -> NSImage {
+        guard let cgImage = ciContext.createCGImage(ciImage, from: ciImage.extent) else {
+            throw ImageDecodeError.failedToDecodeImage
+        }
         return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
     }
 
