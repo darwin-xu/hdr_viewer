@@ -10,8 +10,10 @@ struct HDRMetalView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MTKView {
         let view = MTKView()
-        view.device = MTLCreateSystemDefaultDevice()
-        view.colorPixelFormat = .bgra10_xr
+        let device = MTLCreateSystemDefaultDevice()!
+        view.device = device
+        // rgba16Float gives full half-float precision for EDR values well above 1.0
+        view.colorPixelFormat = .rgba16Float
         view.framebufferOnly = false
         view.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
         view.clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
@@ -19,8 +21,9 @@ struct HDRMetalView: NSViewRepresentable {
         view.enableSetNeedsDisplay = true
         view.delegate = context.coordinator
 
+        // Force the backing CAMetalLayer to support EDR/XDR output
         if let metalLayer = view.layer as? CAMetalLayer {
-            metalLayer.pixelFormat = .bgra10_xr
+            metalLayer.pixelFormat = .rgba16Float
             metalLayer.colorspace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
             metalLayer.wantsExtendedDynamicRangeContent = true
         }
@@ -54,9 +57,11 @@ struct HDRMetalView: NSViewRepresentable {
             guard let drawable = view.currentDrawable else { return }
 
             if ciContext == nil, let device = view.device {
+                let edrColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
                 ciContext = CIContext(mtlDevice: device, options: [
                     .workingFormat: CIFormat.RGBAh,
-                    .workingColorSpace: CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3) as Any
+                    .workingColorSpace: edrColorSpace,
+                    .outputColorSpace: edrColorSpace
                 ])
                 commandQueue = device.makeCommandQueue()
             }
@@ -69,29 +74,20 @@ struct HDRMetalView: NSViewRepresentable {
                 return
             }
 
-            let renderPass = MTLRenderPassDescriptor()
-            renderPass.colorAttachments[0].texture = drawable.texture
-            renderPass.colorAttachments[0].loadAction = .clear
-            renderPass.colorAttachments[0].storeAction = .store
-            renderPass.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 1)
-
-            let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass)
-            encoder?.endEncoding()
+            // Use the EDR-capable extended linear P3 colorspace.
+            // Values > 1.0 will drive the display above SDR white (XDR headroom).
+            let edrColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
 
             if let ciImage {
                 let bounds = CGRect(origin: .zero, size: view.drawableSize)
                 let transformedImage = fitTransformedImage(ciImage, into: bounds.size)
-
-                let colorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)
-                    ?? CGColorSpace(name: CGColorSpace.displayP3)
-                    ?? CGColorSpaceCreateDeviceRGB()
 
                 ciContext.render(
                     transformedImage,
                     to: drawable.texture,
                     commandBuffer: commandBuffer,
                     bounds: bounds,
-                    colorSpace: colorSpace
+                    colorSpace: edrColorSpace
                 )
             }
 
