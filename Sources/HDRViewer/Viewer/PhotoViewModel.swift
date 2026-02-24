@@ -1,11 +1,15 @@
 import AppKit
+import CoreImage
 import Foundation
 
 @MainActor
 final class PhotoViewModel: ObservableObject {
+    private static let startPointDefaultsKey = "hdrViewer.treeStartPoints"
+
     @Published private(set) var photos: [PhotoItem] = []
     @Published private(set) var currentIndex: Int = 0
     @Published private(set) var currentImage: NSImage?
+    @Published private(set) var currentCIImage: CIImage?
     @Published private(set) var currentMetadata: PhotoMetadata?
     @Published private(set) var currentFolderURL: URL?
     @Published private(set) var treeStartPoints: [URL] = []
@@ -27,6 +31,7 @@ final class PhotoViewModel: ObservableObject {
         self.decodeService = decodeService
         self.cache = cache
         self.metadataService = metadataService
+        loadPersistedStartPoints()
     }
 
     var currentPhoto: PhotoItem? {
@@ -47,19 +52,23 @@ final class PhotoViewModel: ObservableObject {
     }
 
     func addStartPoint(_ folderURL: URL) {
-        if !treeStartPoints.contains(folderURL) {
-            treeStartPoints.append(folderURL)
+        let normalizedURL = folderURL.standardizedFileURL
+
+        if !treeStartPoints.contains(normalizedURL) {
+            treeStartPoints.append(normalizedURL)
             treeStartPoints.sort {
                 $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
             }
+            persistStartPoints()
         }
 
-        selectFolderFromTree(folderURL)
+        selectFolderFromTree(normalizedURL)
     }
 
     func selectFolderFromTree(_ folderURL: URL) {
-        selectedTreeFolderURL = folderURL
-        loadFolder(folderURL)
+        let normalizedURL = folderURL.standardizedFileURL
+        selectedTreeFolderURL = normalizedURL
+        loadFolder(normalizedURL)
     }
 
     func subfolders(for folderURL: URL) -> [URL] {
@@ -84,6 +93,7 @@ final class PhotoViewModel: ObservableObject {
 
             guard !items.isEmpty else {
                 currentImage = nil
+                currentCIImage = nil
                 currentMetadata = nil
                 return
             }
@@ -132,8 +142,15 @@ final class PhotoViewModel: ObservableObject {
                 currentImage = image
             } catch {
                 currentImage = nil
+                currentCIImage = nil
                 lastErrorMessage = "Decode failed: \(error.localizedDescription)"
             }
+        }
+
+        if let ciImage = try? decodeService.decodeCIImage(from: photo.url) {
+            currentCIImage = ciImage
+        } else {
+            currentCIImage = nil
         }
 
         currentMetadata = metadataService.readMetadata(from: photo.url)
@@ -152,5 +169,25 @@ final class PhotoViewModel: ObservableObject {
                 }
             }
         }
+    }
+
+    private func loadPersistedStartPoints() {
+        guard let paths = UserDefaults.standard.array(forKey: Self.startPointDefaultsKey) as? [String] else {
+            treeStartPoints = []
+            return
+        }
+
+        let existingURLs = paths
+            .map { URL(fileURLWithPath: $0).standardizedFileURL }
+            .filter { FileManager.default.fileExists(atPath: $0.path) }
+
+        treeStartPoints = Array(Set(existingURLs)).sorted {
+            $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending
+        }
+    }
+
+    private func persistStartPoints() {
+        let paths = treeStartPoints.map(\.path)
+        UserDefaults.standard.set(paths, forKey: Self.startPointDefaultsKey)
     }
 }

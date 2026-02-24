@@ -105,8 +105,8 @@ struct ContentView: View {
             ZStack {
                 Color.black.opacity(0.95)
 
-                if let image = viewModel.currentImage {
-                    HDRImageView(image: image, zoomScale: zoomScale, panOffset: panOffset)
+                if let ciImage = viewModel.currentCIImage {
+                    HDRMetalView(ciImage: ciImage, zoomScale: zoomScale, panOffset: panOffset)
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .gesture(
                             DragGesture()
