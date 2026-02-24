@@ -74,6 +74,15 @@ struct HDRMetalView: NSViewRepresentable {
                 return
             }
 
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = drawable.texture
+            renderPass.colorAttachments[0].loadAction = .clear
+            renderPass.colorAttachments[0].storeAction = .store
+            renderPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+
+            let clearEncoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass)
+            clearEncoder?.endEncoding()
+
             // Use the EDR-capable extended linear P3 colorspace.
             // Values > 1.0 will drive the display above SDR white (XDR headroom).
             let edrColorSpace = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
