@@ -5,6 +5,8 @@ struct ContentView: View {
     @ObservedObject var viewModel: PhotoViewModel
     @State private var zoomScale: CGFloat = 1.0
     @State private var panOffset: CGSize = .zero
+    @State private var hdrBoostEnabled = false
+    @State private var hdrBoostIntensity = 0.45
 
     var body: some View {
         NavigationSplitView {
@@ -74,6 +76,9 @@ struct ContentView: View {
             }
             viewModel.zoomCommand = nil
         }
+        .onChange(of: viewModel.currentPhoto?.id) { _, _ in
+            hdrBoostEnabled = false
+        }
     }
 
     private var topBar: some View {
@@ -91,6 +96,39 @@ struct ContentView: View {
                 Text("No folder selected")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+            }
+
+            if let sourceType = currentSourceType {
+                switch sourceType {
+                case .nativeHDR:
+                    Text("Native HDR")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.green.opacity(0.18), in: Capsule())
+                case .sdr:
+                    Button("Boosted HDR") {
+                        hdrBoostEnabled.toggle()
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(.gray)
+                case .raw:
+                    Button("RAW HDR") {
+                        hdrBoostEnabled.toggle()
+                    }
+                    .buttonStyle(.borderedProminent)
+                }
+            }
+
+            if currentSourceType != nil, currentSourceType != .nativeHDR {
+                HStack(spacing: 6) {
+                    Text("Intensity")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Slider(value: $hdrBoostIntensity, in: 0...1)
+                        .frame(width: 130)
+                        .disabled(!hdrBoostEnabled)
+                }
             }
 
             Spacer()
@@ -119,7 +157,13 @@ struct ContentView: View {
                 Color.black.opacity(0.95)
 
                 if let ciImage = viewModel.currentCIImage {
-                    HDRMetalView(ciImage: ciImage, zoomScale: zoomScale, panOffset: panOffset)
+                    HDRMetalView(
+                        ciImage: ciImage,
+                        zoomScale: zoomScale,
+                        panOffset: panOffset,
+                        boostMode: currentBoostMode,
+                        boostIntensity: hdrBoostIntensity
+                    )
                         .frame(width: proxy.size.width, height: proxy.size.height)
                         .gesture(
                             DragGesture()
@@ -132,6 +176,22 @@ struct ContentView: View {
                         .foregroundStyle(.white.opacity(0.7))
                 }
             }
+        }
+    }
+
+    private var currentSourceType: PhotoSourceType? {
+        viewModel.currentPhoto?.sourceType
+    }
+
+    private var currentBoostMode: HDRBoostMode {
+        guard hdrBoostEnabled, let sourceType = currentSourceType else { return .none }
+        switch sourceType {
+        case .nativeHDR:
+            return .none
+        case .sdr:
+            return .sdr
+        case .raw:
+            return .raw
         }
     }
 }
