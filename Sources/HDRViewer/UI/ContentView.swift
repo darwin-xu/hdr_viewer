@@ -167,6 +167,19 @@ struct ContentView: View {
                                     panOffset = gesture.translation
                                 }
                         )
+                } else if let image = viewModel.currentImage {
+                    HDRImageView(
+                        image: image,
+                        zoomScale: zoomScale,
+                        panOffset: panOffset
+                    )
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                        .gesture(
+                            DragGesture()
+                                .onChanged { gesture in
+                                    panOffset = gesture.translation
+                                }
+                        )
                 } else {
                     Text("Open a folder to start")
                         .foregroundStyle(.white.opacity(0.7))
