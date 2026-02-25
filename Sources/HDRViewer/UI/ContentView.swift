@@ -83,10 +83,6 @@ struct ContentView: View {
 
     private var topBar: some View {
         HStack {
-            Button("Add Start Point") {
-                viewModel.addStartPointPicker()
-            }
-
             if let folder = viewModel.currentFolderURL {
                 Text(folder.path)
                     .font(.footnote)
