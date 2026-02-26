@@ -122,7 +122,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         let item = AVPlayerItem(asset: asset)
 
         let attrs: [String: Any] = [
-            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_64RGBAHalf,
             kCVPixelBufferMetalCompatibilityKey as String: true
         ]
         let output = AVPlayerItemVideoOutput(pixelBufferAttributes: attrs)
@@ -211,6 +211,10 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
             let itemTime = output.itemTime(forHostTime: hostTime)
             if output.hasNewPixelBuffer(forItemTime: itemTime) {
                 if let pb = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
+                    // CIImage(cvPixelBuffer:) automatically reads the correct
+                    // color space from CVAttachments set by AVFoundation — no
+                    // manual tagging needed.  CIContext handles conversion to
+                    // the extendedLinearDisplayP3 working/output space.
                     lastCIImage = CIImage(cvPixelBuffer: pb).oriented(videoOrientation)
                 }
             }
@@ -241,12 +245,18 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         commandBuffer.commit()
     }
 
-    // MARK: - HDR Boost (mirrors HDRMetalView algorithm)
+    // MARK: - HDR Boost (tuned for video)
+    //
+    // SDR video in linear space has virtually all pixels capped at 1.0,
+    // so the photo threshold of 0.85 catches almost nothing.  We use a
+    // lower threshold (0.55) to reach into mid-tones and a steeper
+    // headroom ramp so the effect is perceptually similar to the photo
+    // boost at the same slider position.
 
     private static func applyHDRBoost(to image: CIImage, intensity: Double) -> CIImage {
         let clamped = min(max(intensity, 0), 1)
-        let threshold = 0.85
-        let headroom = 1.5 + (clamped * 2.0)
+        let threshold = 0.55
+        let headroom = 1.8 + (clamped * 2.5)   // 1.8x – 4.3x SDR white
 
         let luminance = image.applyingFilter("CIColorMatrix", parameters: [
             "inputRVector": CIVector(x: 0.2126, y: 0.7152, z: 0.0722, w: 0),
