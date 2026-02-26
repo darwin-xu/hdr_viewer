@@ -9,7 +9,7 @@ struct VideoPlayerView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> AVPlayerView {
         let view = AVPlayerView()
-        view.controlsStyle = .inline
+        view.controlsStyle = .floating   // no background scrim — keeps video at full brightness
         view.showsFullScreenToggleButton = true
         let player = AVPlayer(url: url)
         player.allowsExternalPlayback = true

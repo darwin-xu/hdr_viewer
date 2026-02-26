@@ -75,7 +75,11 @@ struct ContentView: View {
                 zoomScale = 1.0
                 panOffset = .zero
             }
-            viewModel.zoomCommand = nil
+            // Defer the reset to avoid writing back during the same
+            // SwiftUI update pass, which triggers AttributeGraph cycles.
+            DispatchQueue.main.async {
+                viewModel.zoomCommand = nil
+            }
         }
 
     }
