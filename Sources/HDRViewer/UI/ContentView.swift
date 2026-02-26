@@ -1,5 +1,4 @@
 import AppKit
-import AVKit
 import SwiftUI
 
 struct ContentView: View {
@@ -148,7 +147,11 @@ struct ContentView: View {
                 Color.black.opacity(0.95)
 
                 if viewModel.currentPhoto?.isVideo == true, let videoURL = viewModel.currentVideoURL {
-                    VideoPlayerView(url: videoURL)
+                    VideoPlayerView(
+                        url: videoURL,
+                        hdrBoostEnabled: hdrBoostEnabled,
+                        hdrBoostIntensity: hdrBoostIntensity
+                    )
                         .frame(width: proxy.size.width, height: proxy.size.height)
                 } else if let ciImage = viewModel.currentCIImage {
                     HDRMetalView(
