@@ -77,6 +77,19 @@ final class Logger {
         log(level: .error, message: message, source: source)
     }
 
+    // MARK: - Stderr Capture
+
+    /// Redirect stderr to the log file so system-level messages
+    /// (AttributeGraph warnings, IMK errors, etc.) are captured instead
+    /// of cluttering the Xcode console.
+    func redirectStderrToLogFile() {
+        guard let fileHandle else { return }
+        let fd = fileHandle.fileDescriptor
+        // dup2 redirects STDERR_FILENO → our log file descriptor
+        dup2(fd, STDERR_FILENO)
+        info("stderr redirected to log file", source: "Logger")
+    }
+
     // MARK: - Internal
 
     private func log(level: Level, message: String, source: String) {

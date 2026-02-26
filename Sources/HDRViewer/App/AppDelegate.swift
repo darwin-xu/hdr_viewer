@@ -3,6 +3,7 @@ import AppKit
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         Logger.shared.info("Application launched", source: "App")
+        Logger.shared.redirectStderrToLogFile()
 
         NSApp.setActivationPolicy(.regular)
 
