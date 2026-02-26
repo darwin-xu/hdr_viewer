@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 import ImageIO
 
@@ -22,6 +23,7 @@ final class ThumbnailProvider: ObservableObject {
         }
 
         let decodeService = self.decodeService
+        let isVideo = PhotoItem.videoExtensions.contains(url.pathExtension.lowercased())
 
         Task.detached(priority: .utility) { [weak self] in
             guard let self else { return }
@@ -29,8 +31,11 @@ final class ThumbnailProvider: ObservableObject {
             let fileName = url.lastPathComponent
             let image: NSImage?
 
-            // Try CGImageSource thumbnail first (fast path)
-            if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
+            if isVideo {
+                image = self.thumbnailViaAVAsset(url: url, maxPixelSize: maxPixelSize)
+            } else {
+                // Try CGImageSource thumbnail first (fast path)
+                if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
                 let options: [CFString: Any] = [
                     kCGImageSourceCreateThumbnailFromImageAlways: true,
                     kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
@@ -48,7 +53,8 @@ final class ThumbnailProvider: ObservableObject {
             } else {
                 Logger.shared.warning("CGImageSource creation failed for \(fileName), trying decode fallback", source: "Thumbnail")
                 image = self.thumbnailViaDecodeService(url: url, maxPixelSize: maxPixelSize, decodeService: decodeService)
-            }
+                }
+            } // end image path
 
             guard let image else {
                 Logger.shared.error("All thumbnail methods failed for \(fileName)", source: "Thumbnail")
@@ -103,5 +109,22 @@ final class ThumbnailProvider: ObservableObject {
         )
         newImage.unlockFocus()
         return newImage
+    }
+
+    /// Generate first-frame thumbnail from a video asset.
+    private nonisolated func thumbnailViaAVAsset(url: URL, maxPixelSize: Int) -> NSImage? {
+        let asset = AVAsset(url: url)
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixelSize, height: maxPixelSize)
+
+        do {
+            let cgImage = try generator.copyCGImage(at: .zero, actualTime: nil)
+            Logger.shared.debug("Thumbnail via AVAsset: \(url.lastPathComponent) \(cgImage.width)x\(cgImage.height)", source: "Thumbnail")
+            return NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
+        } catch {
+            Logger.shared.error("AVAsset thumbnail failed for \(url.lastPathComponent): \(error.localizedDescription)", source: "Thumbnail")
+            return nil
+        }
     }
 }

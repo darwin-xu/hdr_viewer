@@ -122,7 +122,7 @@ struct HDRMetalView: NSViewRepresentable {
             let headroom: Double
 
             switch boostMode {
-            case .none:
+            case .none, .video:
                 return image
             case .sdr:
                 threshold = 0.85
