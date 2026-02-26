@@ -162,13 +162,14 @@ final class PhotoViewModel: ObservableObject {
             currentImage = nil
             currentCIImage = nil
             currentVideoURL = photo.url
+            currentMetadata = nil   // clear stale metadata so view doesn't show wrong badge
 
             let url = photo.url
             let metadataService = self.metadataService
 
             loadTask = Task {
                 currentMetadata = metadataService.readMetadata(from: url)
-                log.info("Loaded video metadata for \(photo.fileName)", source: "ViewModel")
+                log.info("Loaded video metadata for \(photo.fileName), isHDR=\(currentMetadata?.isHDRVideo ?? false)", source: "ViewModel")
             }
             return
         }

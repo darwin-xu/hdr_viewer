@@ -104,8 +104,6 @@ struct ContentView: View {
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(Color.green.opacity(0.18), in: Capsule())
-                } else if sourceType == .video {
-                    // Non-HDR video – no boost controls (played via AVPlayer)
                 } else {
                     Toggle("HDR Boost", isOn: $hdrBoostEnabled)
                         .toggleStyle(.button)
