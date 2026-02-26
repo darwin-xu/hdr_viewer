@@ -19,16 +19,25 @@ enum ImageDecodeError: Error, LocalizedError {
 final class ImageDecodeService {
     private let ciContext = CIContext(options: nil)
     private static let rawPreviewMaxPixelSize = 4096
+    private let log = Logger.shared
 
     func decodeImage(from url: URL, maxPixelSize: Int? = nil) throws -> NSImage {
+        let fileName = url.lastPathComponent
+        log.debug("decodeImage: \(fileName) maxPixelSize=\(maxPixelSize.map(String.init) ?? "full")", source: "Decode")
+
         if maxPixelSize == nil {
             do {
                 let ciImage = try decodeCIImage(from: url)
-                return try makeNSImage(from: ciImage)
+                let nsImage = try makeNSImage(from: ciImage)
+                log.info("decodeImage OK via CIImage: \(fileName) \(Int(nsImage.size.width))x\(Int(nsImage.size.height))", source: "Decode")
+                return nsImage
             } catch {
+                log.warning("CIImage decode failed for \(fileName): \(error.localizedDescription), trying embedded JPEG", source: "Decode")
                 if let embeddedJPEG = extractLargestEmbeddedJPEG(from: url) {
+                    log.info("decodeImage OK via embedded JPEG: \(fileName) \(Int(embeddedJPEG.size.width))x\(Int(embeddedJPEG.size.height))", source: "Decode")
                     return embeddedJPEG
                 }
+                log.error("All decode paths failed for \(fileName): \(error.localizedDescription)", source: "Decode")
                 throw error
             }
         }
@@ -36,20 +45,30 @@ final class ImageDecodeService {
         let ext = url.pathExtension.lowercased()
         if isRAW(ext: ext) {
             do {
-                return try decodeRAW(from: url)
+                let image = try decodeRAW(from: url)
+                log.info("decodeImage OK via RAW: \(fileName) \(Int(image.size.width))x\(Int(image.size.height))", source: "Decode")
+                return image
             } catch {
+                log.warning("RAW decode failed for \(fileName): \(error.localizedDescription), trying embedded JPEG", source: "Decode")
                 if let embeddedJPEG = extractLargestEmbeddedJPEG(from: url) {
+                    log.info("decodeImage OK via embedded JPEG: \(fileName) \(Int(embeddedJPEG.size.width))x\(Int(embeddedJPEG.size.height))", source: "Decode")
                     return embeddedJPEG
                 }
+                log.error("All decode paths failed for \(fileName): \(error.localizedDescription)", source: "Decode")
                 throw error
             }
         }
-        return try decodeRaster(from: url, maxPixelSize: maxPixelSize)
+        let raster = try decodeRaster(from: url, maxPixelSize: maxPixelSize)
+        log.info("decodeImage OK via raster: \(fileName) \(Int(raster.size.width))x\(Int(raster.size.height))", source: "Decode")
+        return raster
     }
 
     func decodeCIImage(from url: URL) throws -> CIImage {
         let ext = url.pathExtension.lowercased()
+        let fileName = url.lastPathComponent
+
         if isRAW(ext: ext) {
+            log.debug("decodeCIImage: RAW path for \(fileName)", source: "Decode")
             return try decodeRAWCIImage(from: url)
         }
 
@@ -59,13 +78,16 @@ final class ImageDecodeService {
         ]
 
         if let image = CIImage(contentsOf: url, options: hdrOptions) {
+            log.debug("decodeCIImage OK (HDR) for \(fileName)", source: "Decode")
             return image
         }
 
         if let fallbackImage = CIImage(contentsOf: url, options: [.applyOrientationProperty: true]) {
+            log.debug("decodeCIImage OK (SDR fallback) for \(fileName)", source: "Decode")
             return fallbackImage
         }
 
+        log.error("decodeCIImage failed for \(fileName)", source: "Decode")
         throw ImageDecodeError.failedToDecodeImage
     }
 
@@ -108,16 +130,21 @@ final class ImageDecodeService {
     }
 
     private func decodeRAWCIImage(from url: URL) throws -> CIImage {
-        if
-            let rawFilter = CIFilter(imageURL: url)
-        {
+        let fileName = url.lastPathComponent
+
+        if let rawFilter = CIFilter(imageURL: url) {
             rawFilter.setDefaults()
             if let outputImage = rawFilter.outputImage {
+                log.debug("decodeRAWCIImage OK via CIFilter for \(fileName)", source: "Decode")
                 return outputImage
             }
+            log.warning("CIFilter created but outputImage nil for \(fileName)", source: "Decode")
+        } else {
+            log.warning("CIFilter(imageURL:) returned nil for \(fileName)", source: "Decode")
         }
 
         guard let imageSource = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            log.error("CGImageSource creation failed for \(fileName)", source: "Decode")
             throw ImageDecodeError.failedToCreateImageSource
         }
 
@@ -127,8 +154,10 @@ final class ImageDecodeService {
         ]
 
         if let cgImage = CGImageSourceCreateImageAtIndex(imageSource, 0, fullImageOptions as CFDictionary) {
+            log.debug("decodeRAWCIImage OK via CGImageSource full decode for \(fileName)", source: "Decode")
             return CIImage(cgImage: cgImage)
         }
+        log.warning("CGImageSource full decode failed for \(fileName)", source: "Decode")
 
         let thumbnailOptions: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -138,8 +167,10 @@ final class ImageDecodeService {
         ]
 
         if let cgImage = CGImageSourceCreateThumbnailAtIndex(imageSource, 0, thumbnailOptions as CFDictionary) {
+            log.debug("decodeRAWCIImage OK via CGImageSource thumbnail for \(fileName)", source: "Decode")
             return CIImage(cgImage: cgImage)
         }
+        log.warning("CGImageSource thumbnail failed for \(fileName), trying embedded JPEG", source: "Decode")
 
         // Last resort: extract embedded JPEG from the RAW container
         if let embeddedJPEG = extractLargestEmbeddedJPEG(from: url),
@@ -147,9 +178,11 @@ final class ImageDecodeService {
            let bitmap = NSBitmapImageRep(data: tiffData),
            let cgImage = bitmap.cgImage
         {
+            log.info("decodeRAWCIImage OK via embedded JPEG for \(fileName)", source: "Decode")
             return CIImage(cgImage: cgImage)
         }
 
+        log.error("decodeRAWCIImage: all paths exhausted for \(fileName)", source: "Decode")
         throw ImageDecodeError.failedToDecodeImage
     }
 
@@ -161,7 +194,11 @@ final class ImageDecodeService {
     /// alongside the actual sensor data. When the RAW codec is unavailable on the
     /// host macOS version this preview is the best image we can display.
     private func extractLargestEmbeddedJPEG(from url: URL) -> NSImage? {
+        let fileName = url.lastPathComponent
+        log.debug("Scanning for embedded JPEG in \(fileName)", source: "Decode")
+
         guard let data = try? Data(contentsOf: url, options: .mappedIfSafe) else {
+            log.error("Failed to read file data for \(fileName)", source: "Decode")
             return nil
         }
 
@@ -213,6 +250,11 @@ final class ImageDecodeService {
             pos = eoiEnd
         }
 
+        if let bestImage {
+            log.info("Embedded JPEG found in \(fileName): \(bestPixelCount) pixels (\(Int(bestImage.size.width))x\(Int(bestImage.size.height)))", source: "Decode")
+        } else {
+            log.warning("No usable embedded JPEG found in \(fileName)", source: "Decode")
+        }
         return bestImage
     }
 
