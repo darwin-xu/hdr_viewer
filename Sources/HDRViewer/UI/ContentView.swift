@@ -1,4 +1,5 @@
 import AppKit
+import AVKit
 import SwiftUI
 
 struct ContentView: View {
@@ -93,12 +94,14 @@ struct ContentView: View {
             }
 
             if let sourceType = currentSourceType {
-                if sourceType == .nativeHDR {
-                    Text("Native HDR")
+                if sourceType == .nativeHDR || sourceType == .videoHDR {
+                    Text(sourceType == .videoHDR ? "HDR Video" : "Native HDR")
                         .font(.footnote.weight(.semibold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(Color.green.opacity(0.18), in: Capsule())
+                } else if sourceType == .video {
+                    // Non-HDR video – no boost controls (played via AVPlayer)
                 } else {
                     Toggle("HDR Boost", isOn: $hdrBoostEnabled)
                         .toggleStyle(.button)
@@ -117,19 +120,21 @@ struct ContentView: View {
 
             Spacer()
 
-            Button("-") {
-                zoomScale = max(0.1, zoomScale - 0.1)
-            }
-            .frame(width: 30)
+            if viewModel.currentPhoto?.isVideo != true {
+                Button("-") {
+                    zoomScale = max(0.1, zoomScale - 0.1)
+                }
+                .frame(width: 30)
 
-            Button("+") {
-                zoomScale = min(5.0, zoomScale + 0.1)
-            }
-            .frame(width: 30)
+                Button("+") {
+                    zoomScale = min(5.0, zoomScale + 0.1)
+                }
+                .frame(width: 30)
 
-            Button("Reset") {
-                zoomScale = 1.0
-                panOffset = .zero
+                Button("Reset") {
+                    zoomScale = 1.0
+                    panOffset = .zero
+                }
             }
         }
         .padding(10)
@@ -140,7 +145,10 @@ struct ContentView: View {
             ZStack {
                 Color.black.opacity(0.95)
 
-                if let ciImage = viewModel.currentCIImage {
+                if viewModel.currentPhoto?.isVideo == true, let videoURL = viewModel.currentVideoURL {
+                    VideoPlayerView(url: videoURL)
+                        .frame(width: proxy.size.width, height: proxy.size.height)
+                } else if let ciImage = viewModel.currentCIImage {
                     HDRMetalView(
                         ciImage: ciImage,
                         zoomScale: zoomScale,
@@ -177,13 +185,18 @@ struct ContentView: View {
     }
 
     private var currentSourceType: PhotoSourceType? {
-        viewModel.currentPhoto?.sourceType
+        guard let photo = viewModel.currentPhoto else { return nil }
+        // For video, upgrade to .videoHDR at runtime if metadata confirms HDR
+        if photo.isVideo, let metadata = viewModel.currentMetadata, metadata.isHDRVideo {
+            return .videoHDR
+        }
+        return photo.sourceType
     }
 
     private var currentBoostMode: HDRBoostMode {
         guard hdrBoostEnabled, let sourceType = currentSourceType else { return .none }
         switch sourceType {
-        case .nativeHDR:
+        case .nativeHDR, .video, .videoHDR:
             return .none
         case .sdr:
             return .sdr

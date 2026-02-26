@@ -1,10 +1,8 @@
 import Foundation
 
 final class FolderIndex {
-    private let supportedExtensions: Set<String> = [
-        "jpg", "jpeg", "png", "tif", "tiff", "heif", "heic",
-        "dng", "cr2", "cr3", "nef", "arw", "raf"
-    ]
+    private let supportedExtensions: Set<String> =
+        PhotoItem.imageExtensions.union(PhotoItem.videoExtensions)
 
     func listPhotos(in folderURL: URL) throws -> [PhotoItem] {
         let keys: [URLResourceKey] = [.isRegularFileKey, .nameKey, .contentModificationDateKey]

@@ -9,8 +9,8 @@ struct FolderIndexTests {
         defer { try? FileManager.default.removeItem(at: tempDir) }
 
         let fileManager = FileManager.default
-        let supported = ["a.jpg", "b.CR3", "c.NEF", "d.heic", "e.tiff"]
-        let unsupported = ["x.txt", "y.json", "z.mp4"]
+        let supported = ["a.jpg", "b.CR3", "c.NEF", "d.heic", "e.tiff", "z.mp4"]
+        let unsupported = ["x.txt", "y.json"]
 
         for name in supported + unsupported {
             let url = tempDir.appendingPathComponent(name)

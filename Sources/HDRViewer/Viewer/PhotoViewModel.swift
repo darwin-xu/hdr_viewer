@@ -16,6 +16,7 @@ final class PhotoViewModel: ObservableObject {
     @Published private(set) var currentIndex: Int = 0
     @Published private(set) var currentImage: NSImage?
     @Published private(set) var currentCIImage: CIImage?
+    @Published private(set) var currentVideoURL: URL?
     @Published private(set) var currentMetadata: PhotoMetadata?
     @Published private(set) var currentFolderURL: URL?
     @Published private(set) var treeStartPoints: [URL] = []
@@ -121,6 +122,7 @@ final class PhotoViewModel: ObservableObject {
             guard !items.isEmpty else {
                 currentImage = nil
                 currentCIImage = nil
+                currentVideoURL = nil
                 currentMetadata = nil
                 return
             }
@@ -154,6 +156,25 @@ final class PhotoViewModel: ObservableObject {
         loadTask?.cancel()
         preloadTask?.cancel()
         guard let photo = currentPhoto else { return }
+
+        // --- Video path: no image decode needed ---
+        if photo.isVideo {
+            currentImage = nil
+            currentCIImage = nil
+            currentVideoURL = photo.url
+
+            let url = photo.url
+            let metadataService = self.metadataService
+
+            loadTask = Task {
+                currentMetadata = metadataService.readMetadata(from: url)
+                log.info("Loaded video metadata for \(photo.fileName)", source: "ViewModel")
+            }
+            return
+        }
+
+        // --- Image path ---
+        currentVideoURL = nil
 
         // Show cached image immediately if available (no delay)
         if let cached = cache.image(for: photo.url) {
@@ -240,6 +261,7 @@ final class PhotoViewModel: ObservableObject {
                 for index in neighborIndexes {
                     guard !Task.isCancelled else { return }
                     let photo = photos[index]
+                    guard !photo.isVideo else { continue } // skip preloading for video
                     if cache.image(for: photo.url) != nil { continue }
                     if let image = try? decodeService.decodeImage(from: photo.url, maxPixelSize: 2500) {
                         cache.setImage(image, for: photo.url)
