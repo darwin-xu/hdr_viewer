@@ -76,9 +76,7 @@ struct ContentView: View {
             }
             viewModel.zoomCommand = nil
         }
-        .onChange(of: viewModel.currentPhoto?.id) { _, _ in
-            hdrBoostEnabled = false
-        }
+
     }
 
     private var topBar: some View {
@@ -95,35 +93,25 @@ struct ContentView: View {
             }
 
             if let sourceType = currentSourceType {
-                switch sourceType {
-                case .nativeHDR:
+                if sourceType == .nativeHDR {
                     Text("Native HDR")
                         .font(.footnote.weight(.semibold))
                         .padding(.horizontal, 8)
                         .padding(.vertical, 4)
                         .background(Color.green.opacity(0.18), in: Capsule())
-                case .sdr:
-                    Button("Boosted HDR") {
-                        hdrBoostEnabled.toggle()
-                    }
-                    .buttonStyle(.bordered)
-                    .tint(.gray)
-                case .raw:
-                    Button("RAW HDR") {
-                        hdrBoostEnabled.toggle()
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-            }
+                } else {
+                    Toggle("HDR Boost", isOn: $hdrBoostEnabled)
+                        .toggleStyle(.button)
+                        .tint(hdrBoostEnabled ? .blue : .gray)
 
-            if currentSourceType != nil, currentSourceType != .nativeHDR {
-                HStack(spacing: 6) {
-                    Text("Intensity")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    Slider(value: $hdrBoostIntensity, in: 0...1)
-                        .frame(width: 130)
-                        .disabled(!hdrBoostEnabled)
+                    HStack(spacing: 6) {
+                        Text("Intensity")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Slider(value: $hdrBoostIntensity, in: 0...1)
+                            .frame(width: 130)
+                            .disabled(!hdrBoostEnabled)
+                    }
                 }
             }
 
