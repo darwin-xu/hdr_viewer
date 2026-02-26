@@ -60,6 +60,12 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
     private var lastCIImage: CIImage?
     private var videoOrientation: CGImagePropertyOrientation = .up
 
+    // --- Frame-skip state ---
+    private var cachedBoostEnabled = false
+    private var cachedBoostIntensity = 0.45
+    private var lastDrawableSize: CGSize = .zero
+    private var hasRenderedContent = false        // at least one frame rendered
+
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
     private(set) var duration: Double = 0
@@ -117,6 +123,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         currentURL = url
         lastCIImage = nil
         isPlaying = false
+        hasRenderedContent = false
 
         let asset = AVAsset(url: url)
         let item = AVPlayerItem(asset: asset)
@@ -192,6 +199,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         player?.pause()
         player = nil
         videoOutput = nil
+        hasRenderedContent = false
     }
 
     // MARK: - MTKViewDelegate
@@ -199,28 +207,44 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
     func draw(in view: MTKView) {
-        guard let drawable = view.currentDrawable,
-              let ciContext,
-              let commandQueue,
-              let commandBuffer = commandQueue.makeCommandBuffer()
-        else { return }
+        guard let ciContext, let commandQueue else { return }
 
-        // Pull latest video frame
+        // ── 1. Pull latest video frame ──────────────────────────────
+        var gotNewFrame = false
         if let output = videoOutput {
             let hostTime = CACurrentMediaTime()
             let itemTime = output.itemTime(forHostTime: hostTime)
-            if output.hasNewPixelBuffer(forItemTime: itemTime) {
-                if let pb = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
-                    // CIImage(cvPixelBuffer:) automatically reads the correct
-                    // color space from CVAttachments set by AVFoundation — no
-                    // manual tagging needed.  CIContext handles conversion to
-                    // the extendedLinearDisplayP3 working/output space.
-                    lastCIImage = CIImage(cvPixelBuffer: pb).oriented(videoOrientation)
-                }
+            if output.hasNewPixelBuffer(forItemTime: itemTime),
+               let pb = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
+                // CIImage(cvPixelBuffer:) automatically reads the correct
+                // color space from CVAttachments set by AVFoundation — no
+                // manual tagging needed.
+                lastCIImage = CIImage(cvPixelBuffer: pb).oriented(videoOrientation)
+                gotNewFrame = true
             }
         }
 
-        // Clear
+        // ── 2. Detect whether re-render is needed ───────────────────
+        let boostChanged = hdrBoostEnabled != cachedBoostEnabled
+                        || abs(hdrBoostIntensity - cachedBoostIntensity) > 0.001
+        let sizeChanged  = view.drawableSize != lastDrawableSize
+        let needsRender  = gotNewFrame || boostChanged || sizeChanged || !hasRenderedContent
+
+        // Nothing changed — the previously-presented drawable is still
+        // visible on screen.  Skip all GPU work.
+        if !needsRender { return }
+
+        // Update tracking state
+        cachedBoostEnabled   = hdrBoostEnabled
+        cachedBoostIntensity = hdrBoostIntensity
+        lastDrawableSize     = view.drawableSize
+
+        // ── 3. Render directly to drawable ──────────────────────────
+        guard let drawable = view.currentDrawable,
+              let commandBuffer = commandQueue.makeCommandBuffer()
+        else { return }
+
+        // Clear to black
         let renderPass = MTLRenderPassDescriptor()
         renderPass.colorAttachments[0].texture = drawable.texture
         renderPass.colorAttachments[0].loadAction = .clear
@@ -229,13 +253,12 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass)
         encoder?.endEncoding()
 
-        let edrCS = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
-
         if var image = lastCIImage {
             if hdrBoostEnabled {
                 image = Self.applyHDRBoost(to: image, intensity: hdrBoostIntensity)
             }
             let fitted = Self.fitImage(image, into: view.drawableSize)
+            let edrCS = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
             ciContext.render(fitted, to: drawable.texture, commandBuffer: commandBuffer,
                             bounds: CGRect(origin: .zero, size: view.drawableSize),
                             colorSpace: edrCS)
@@ -243,6 +266,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
 
         commandBuffer.present(drawable)
         commandBuffer.commit()
+        hasRenderedContent = true
     }
 
     // MARK: - HDR Boost (tuned for video)
