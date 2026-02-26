@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreMedia
 import Foundation
 import ImageIO
 
@@ -126,21 +127,55 @@ final class MetadataService: @unchecked Sendable {
     /// Detect HDR by checking video track format descriptions for HLG, PQ (HDR10),
     /// or Dolby Vision transfer functions / extensions.
     private func detectVideoHDR(tracks: [AVAssetTrack]) -> Bool {
+        let log = Logger.shared
+        let hdrTransferFunctions: Set<String> = [
+            kCMFormatDescriptionTransferFunction_ITU_R_2100_HLG as String,
+            kCMFormatDescriptionTransferFunction_SMPTE_ST_2084_PQ as String
+        ]
+        let tfKey = kCMFormatDescriptionExtension_TransferFunction as String
+
         for track in tracks {
             for desc in track.formatDescriptions {
                 let formatDesc = desc as! CMFormatDescription
-                if let extensions = CMFormatDescriptionGetExtensions(formatDesc) as? [String: Any] {
-                    // Check transfer function
-                    if let tf = extensions["TransferFunction"] as? String {
-                        let hdrTransfers = ["ITU_R_2100_HLG", "SMPTE_ST_2084_PQ"]
-                        if hdrTransfers.contains(where: { tf.contains($0) }) { return true }
+                guard let extensions = CMFormatDescriptionGetExtensions(formatDesc) as? [String: Any] else {
+                    log.debug("detectVideoHDR: no extensions on format description", source: "Metadata")
+                    continue
+                }
+
+                log.debug("detectVideoHDR: extension keys = \(Array(extensions.keys))", source: "Metadata")
+
+                // Check transfer function (HLG / PQ)
+                if let tf = extensions[tfKey] as? String {
+                    log.debug("detectVideoHDR: TransferFunction = \(tf)", source: "Metadata")
+                    if hdrTransferFunctions.contains(tf) {
+                        log.info("detectVideoHDR: HDR detected via transfer function \(tf)", source: "Metadata")
+                        return true
                     }
-                    // Check for Dolby Vision configuration
-                    if extensions["DolbyVisionConfigurationRecord"] != nil { return true }
-                    if extensions["DolbyVisionELConfigurationRecord"] != nil { return true }
+                }
+
+                // Check for Dolby Vision configuration records
+                if extensions["DolbyVisionConfigurationRecord"] != nil {
+                    log.info("detectVideoHDR: HDR detected via DolbyVisionConfigurationRecord", source: "Metadata")
+                    return true
+                }
+                if extensions["DolbyVisionELConfigurationRecord"] != nil {
+                    log.info("detectVideoHDR: HDR detected via DolbyVisionELConfigurationRecord", source: "Metadata")
+                    return true
+                }
+
+                // Check color primaries as supplementary indicator (BT.2020)
+                let cpKey = kCMFormatDescriptionExtension_ColorPrimaries as String
+                if let cp = extensions[cpKey] as? String {
+                    log.debug("detectVideoHDR: ColorPrimaries = \(cp)", source: "Metadata")
+                    let bt2020 = kCMFormatDescriptionColorPrimaries_ITU_R_2020 as String
+                    if cp == bt2020 {
+                        log.info("detectVideoHDR: HDR detected via BT.2020 color primaries", source: "Metadata")
+                        return true
+                    }
                 }
             }
         }
+        log.debug("detectVideoHDR: no HDR indicators found (\(tracks.count) tracks)", source: "Metadata")
         return false
     }
 
