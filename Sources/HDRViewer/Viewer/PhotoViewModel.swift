@@ -27,6 +27,7 @@ final class PhotoViewModel: ObservableObject {
     private let decodeService: ImageDecodeService
     private let cache: ImageCache
     private let metadataService: MetadataService
+    private let log = Logger.shared
 
     init(
         folderIndex: FolderIndex,
@@ -103,12 +104,14 @@ final class PhotoViewModel: ObservableObject {
     }
 
     func loadFolder(_ folderURL: URL) {
+        log.info("Loading folder: \(folderURL.path)", source: "ViewModel")
         do {
             let items = try folderIndex.listPhotos(in: folderURL)
             currentFolderURL = folderURL
             photos = items
             currentIndex = 0
             cache.clear()
+            log.info("Found \(items.count) photo(s) in \(folderURL.lastPathComponent)", source: "ViewModel")
 
             guard !items.isEmpty else {
                 currentImage = nil
@@ -121,6 +124,7 @@ final class PhotoViewModel: ObservableObject {
                 await loadCurrentImage()
             }
         } catch {
+            log.error("loadFolder failed: \(error.localizedDescription)", source: "ViewModel")
             lastErrorMessage = error.localizedDescription
         }
     }
@@ -151,25 +155,32 @@ final class PhotoViewModel: ObservableObject {
 
     private func loadCurrentImage() async {
         guard let photo = currentPhoto else { return }
+        let fileName = photo.fileName
+        log.debug("loadCurrentImage: \(fileName)", source: "ViewModel")
 
         if let cached = cache.image(for: photo.url) {
+            log.debug("Using cached NSImage for \(fileName)", source: "ViewModel")
             currentImage = cached
         } else {
             do {
                 let image = try decodeService.decodeImage(from: photo.url)
                 cache.setImage(image, for: photo.url)
                 currentImage = image
+                log.info("Loaded NSImage for \(fileName): \(Int(image.size.width))x\(Int(image.size.height))", source: "ViewModel")
             } catch {
                 currentImage = nil
                 currentCIImage = nil
+                log.error("Decode failed for \(fileName): \(error.localizedDescription)", source: "ViewModel")
                 lastErrorMessage = "Decode failed: \(error.localizedDescription)"
             }
         }
 
         if let ciImage = try? decodeService.decodeCIImage(from: photo.url) {
             currentCIImage = ciImage
+            log.debug("CIImage available for \(fileName)", source: "ViewModel")
         } else {
             currentCIImage = nil
+            log.debug("No CIImage for \(fileName), will use NSImage fallback viewer", source: "ViewModel")
         }
 
         currentMetadata = metadataService.readMetadata(from: photo.url)
