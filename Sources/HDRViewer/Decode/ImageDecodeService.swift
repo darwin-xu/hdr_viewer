@@ -16,7 +16,7 @@ enum ImageDecodeError: Error, LocalizedError {
     }
 }
 
-final class ImageDecodeService {
+final class ImageDecodeService: @unchecked Sendable {
     private let ciContext = CIContext(options: nil)
     private static let rawPreviewMaxPixelSize = 4096
     private let log = Logger.shared

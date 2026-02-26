@@ -12,7 +12,7 @@ struct PhotoMetadata {
     let focalLength: Double?
 }
 
-final class MetadataService {
+final class MetadataService: @unchecked Sendable {
     func readMetadata(from url: URL) -> PhotoMetadata {
         guard
             let source = CGImageSourceCreateWithURL(url as CFURL, nil),

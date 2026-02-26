@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-final class ImageCache {
+final class ImageCache: @unchecked Sendable {
     private final class WrappedImage {
         let image: NSImage
 
