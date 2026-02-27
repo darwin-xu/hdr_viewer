@@ -148,8 +148,9 @@ final class ThumbnailProvider: ObservableObject {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.standardInput = FileHandle.nullDevice
         process.arguments = [
-            "-y",
+            "-nostdin", "-y",
             "-i", url.path,
             "-vframes", "1",
             "-vf", "scale=\(maxPixelSize):\(maxPixelSize):force_original_aspect_ratio=decrease",
