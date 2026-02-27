@@ -175,28 +175,111 @@ final class PhotoViewModel: ObservableObject {
             if needsTranscode { isTranscoding = true }
 
             loadTask = Task {
-                let playableURL: URL
                 if needsTranscode {
+                    log.debug("Starting transcode flow for \(photo.fileName)", source: "ViewModel")
+
+                    // --- Step 1: Try fast path (cache hit or remux) ---
                     do {
-                        playableURL = try await Task.detached(priority: .userInitiated) {
-                            try TranscodeService.shared.playableURL(for: url)
+                        let fastURL = try await Task.detached(priority: .userInitiated) {
+                            try TranscodeService.shared.tryFastPath(for: url)
                         }.value
+                        guard !Task.isCancelled else { return }
+
+                        if let fastURL {
+                            // Remux or cache hit — play immediately
+                            isTranscoding = false
+                            currentVideoURL = fastURL
+                            currentMetadata = metadataService.readMetadata(from: url)
+                            log.info("Fast-path video ready for \(photo.fileName)", source: "ViewModel")
+                            return
+                        }
+                    } catch is CancellationError {
+                        return
                     } catch {
                         guard !Task.isCancelled else { return }
-                        isTranscoding = false
-                        log.error("Transcode failed for \(photo.fileName): \(error.localizedDescription)", source: "ViewModel")
-                        lastErrorMessage = error.localizedDescription
+                        // tryFastPath failed (e.g. ffmpeg not found) —
+                        // log the error but still attempt progressive transcode
+                        log.error("Fast path failed for \(photo.fileName): \(error.localizedDescription)", source: "ViewModel")
+                    }
+
+                    guard !Task.isCancelled else { return }
+
+                    // --- Step 2: Progressive transcode (re-encode) ---
+                    // Start ffmpeg producing fragmented MP4 in background,
+                    // start playback once the first fragments appear.
+                    let transcodeService = TranscodeService.shared
+                    let outputURL = transcodeService.outputURL(for: url)
+
+                    log.info("Starting progressive re-encode for \(photo.fileName)", source: "ViewModel")
+
+                    // Launch the background encode (runs until done or cancelled)
+                    let encodeTask = Task.detached(priority: .userInitiated) {
+                        try transcodeService.transcodeProgressively(for: url)
+                    }
+
+                    // Wait for the file to have enough data to start playback
+                    // (at least 64KB means the first fragments are written)
+                    let minBytes: UInt64 = 64 * 1024
+                    let maxWait = 400  // 400 × 50ms = 20s max wait
+                    var waited = 0
+                    while waited < maxWait {
+                        guard !Task.isCancelled else {
+                            encodeTask.cancel()
+                            return
+                        }
+                        if let attrs = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
+                           let size = attrs[.size] as? UInt64, size >= minBytes {
+                            log.debug("Output file reached \(size) bytes after \(waited * 50)ms", source: "ViewModel")
+                            break
+                        }
+                        try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
+                        waited += 1
+                    }
+
+                    guard !Task.isCancelled else {
+                        encodeTask.cancel()
                         return
                     }
-                    guard !Task.isCancelled else { return }
-                    isTranscoding = false
-                } else {
-                    playableURL = url
-                }
 
-                currentVideoURL = playableURL
-                currentMetadata = metadataService.readMetadata(from: url)
-                log.info("Loaded video metadata for \(photo.fileName), isHDR=\(currentMetadata?.isHDRVideo ?? false)", source: "ViewModel")
+                    // Check if we actually have data (timeout expired with no/too-small file)
+                    let fileExists = FileManager.default.fileExists(atPath: outputURL.path)
+                    let fileSize: UInt64 = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? UInt64) ?? 0
+
+                    if !fileExists || fileSize < minBytes {
+                        log.error("Transcode timed out for \(photo.fileName) (size=\(fileSize) after \(waited * 50)ms), waiting for completion…", source: "ViewModel")
+                        // Wait for the full encode to finish instead of giving up
+                        do {
+                            _ = try await encodeTask.value
+                        } catch is CancellationError {
+                            return
+                        } catch {
+                            guard !Task.isCancelled else { return }
+                            isTranscoding = false
+                            log.error("Re-encode failed for \(photo.fileName): \(error.localizedDescription)", source: "ViewModel")
+                            lastErrorMessage = "Transcode failed: \(error.localizedDescription)"
+                            return
+                        }
+                    }
+
+                    guard !Task.isCancelled else {
+                        encodeTask.cancel()
+                        return
+                    }
+
+                    // Start playback — ffmpeg may still be writing in the background
+                    isTranscoding = false
+                    currentVideoURL = outputURL
+                    currentMetadata = metadataService.readMetadata(from: url)
+                    log.info("Progressive playback started for \(photo.fileName), transcode continuing in background", source: "ViewModel")
+
+                    // Wait for encode to finish (or be cancelled)
+                    _ = try? await encodeTask.value
+                } else {
+                    // No transcode needed
+                    currentVideoURL = url
+                    currentMetadata = metadataService.readMetadata(from: url)
+                    log.info("Loaded video metadata for \(photo.fileName), isHDR=\(currentMetadata?.isHDRVideo ?? false)", source: "ViewModel")
+                }
             }
             return
         }
