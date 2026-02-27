@@ -32,7 +32,12 @@ final class ThumbnailProvider: ObservableObject {
             let image: NSImage?
 
             if isVideo {
-                image = self.thumbnailViaAVAsset(url: url, maxPixelSize: maxPixelSize)
+                if TranscodeService.needsTranscode(url) {
+                    image = self.thumbnailViaFFmpeg(url: url, maxPixelSize: maxPixelSize)
+                        ?? self.thumbnailViaAVAsset(url: url, maxPixelSize: maxPixelSize)
+                } else {
+                    image = self.thumbnailViaAVAsset(url: url, maxPixelSize: maxPixelSize)
+                }
             } else {
                 // Try CGImageSource thumbnail first (fast path)
                 if let source = CGImageSourceCreateWithURL(url as CFURL, nil) {
@@ -126,5 +131,52 @@ final class ThumbnailProvider: ObservableObject {
             Logger.shared.error("AVAsset thumbnail failed for \(url.lastPathComponent): \(error.localizedDescription)", source: "Thumbnail")
             return nil
         }
+    }
+
+    /// Generate thumbnail using ffmpeg for formats AVFoundation can't read.
+    private nonisolated func thumbnailViaFFmpeg(url: URL, maxPixelSize: Int) -> NSImage? {
+        // Find ffmpeg
+        let candidates = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
+        let ffmpegPath = candidates.first { FileManager.default.isExecutableFile(atPath: $0) }
+        guard let ffmpeg = ffmpegPath else {
+            Logger.shared.error("ffmpeg not found for thumbnail generation", source: "Thumbnail")
+            return nil
+        }
+
+        let tempFile = FileManager.default.temporaryDirectory
+            .appendingPathComponent("hdrv_thumb_\(UUID().uuidString).jpg")
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffmpeg)
+        process.arguments = [
+            "-y",
+            "-i", url.path,
+            "-vframes", "1",
+            "-vf", "scale=\(maxPixelSize):\(maxPixelSize):force_original_aspect_ratio=decrease",
+            "-q:v", "2",
+            "-loglevel", "warning",
+            tempFile.path
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            Logger.shared.error("ffmpeg thumbnail process failed for \(url.lastPathComponent): \(error.localizedDescription)", source: "Thumbnail")
+            return nil
+        }
+
+        defer { try? FileManager.default.removeItem(at: tempFile) }
+
+        guard process.terminationStatus == 0,
+              let image = NSImage(contentsOf: tempFile) else {
+            Logger.shared.error("ffmpeg thumbnail failed for \(url.lastPathComponent) (exit \(process.terminationStatus))", source: "Thumbnail")
+            return nil
+        }
+
+        Logger.shared.debug("Thumbnail via ffmpeg: \(url.lastPathComponent) \(Int(image.size.width))x\(Int(image.size.height))", source: "Thumbnail")
+        return image
     }
 }

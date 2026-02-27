@@ -146,10 +146,18 @@ struct ContentView: View {
             ZStack {
                 Color.black.opacity(0.95)
 
-                if viewModel.currentPhoto?.isVideo == true, let videoURL = viewModel.currentVideoURL {
+                if viewModel.isTranscoding {
+                    VStack(spacing: 12) {
+                        ProgressView()
+                            .controlSize(.large)
+                        Text("Transcoding video…")
+                            .foregroundStyle(.white.opacity(0.7))
+                            .font(.callout)
+                    }
+                } else if viewModel.currentPhoto?.isVideo == true, let videoURL = viewModel.currentVideoURL {
                     VideoPlayerView(
                         url: videoURL,
-                        hdrBoostEnabled: hdrBoostEnabled,
+                        hdrBoostEnabled: hdrBoostEnabled && currentSourceType != .videoHDR,
                         hdrBoostIntensity: hdrBoostIntensity
                     )
                         .frame(width: proxy.size.width, height: proxy.size.height)
