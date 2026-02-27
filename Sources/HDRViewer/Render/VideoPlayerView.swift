@@ -70,6 +70,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
     private var endObserver: NSObjectProtocol?
     private(set) var duration: Double = 0
     private(set) var isPlaying = false
+    private var wasPlayingBeforeSeek = false
 
     override init() {
         let device = MTLCreateSystemDefaultDevice()!
@@ -185,10 +186,37 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         containerView.updatePlayState(isPlaying)
     }
 
+    /// Seek with fast (non-exact) tolerance — suitable for continuous
+    /// dragging where responsiveness matters more than frame accuracy.
     func seek(to fraction: Double) {
         guard let player, duration > 0 else { return }
         let target = CMTime(seconds: fraction * duration, preferredTimescale: 600)
+        let tol = CMTime(seconds: 0.1, preferredTimescale: 600)
+        player.seek(to: target, toleranceBefore: tol, toleranceAfter: tol)
+    }
+
+    /// Exact seek — used on drag end for frame-accurate final position.
+    func seekExact(to fraction: Double) {
+        guard let player, duration > 0 else { return }
+        let target = CMTime(seconds: fraction * duration, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+    }
+
+    /// Pause playback temporarily for seeking; remembers the playing state.
+    func beginSeeking() {
+        wasPlayingBeforeSeek = isPlaying
+        if isPlaying { player?.pause() }
+    }
+
+    /// Resume playback if it was playing before the seek began, and
+    /// do a final frame-accurate seek.
+    func endSeeking(at fraction: Double) {
+        seekExact(to: fraction)
+        if wasPlayingBeforeSeek {
+            player?.play()
+            isPlaying = true
+            containerView.updatePlayState(true)
+        }
     }
 
     func cleanup() {
@@ -374,6 +402,7 @@ final class VideoContainerView: NSView {
         seekSlider.isContinuous = true
         seekSlider.target = self
         seekSlider.action = #selector(sliderChanged)
+        seekSlider.containerView = self
         seekSlider.translatesAutoresizingMaskIntoConstraints = false
         controlsBar.addSubview(seekSlider)
 
@@ -446,7 +475,19 @@ final class VideoContainerView: NSView {
 
     @objc private func playPauseTapped() { coordinator?.togglePlayPause() }
 
-    @objc private func sliderChanged() { coordinator?.seek(to: seekSlider.doubleValue) }
+    @objc private func sliderChanged() {
+        coordinator?.seek(to: seekSlider.doubleValue)
+    }
+
+    /// Called when the user first clicks on the slider.
+    func sliderBeganTracking() {
+        coordinator?.beginSeeking()
+    }
+
+    /// Called when the user releases the slider.
+    func sliderEndedTracking() {
+        coordinator?.endSeeking(at: seekSlider.doubleValue)
+    }
 
     // MARK: - Show / hide
 
@@ -480,9 +521,13 @@ final class VideoContainerView: NSView {
 
 final class VideoTrackingSlider: NSSlider {
     private(set) var isTracking = false
+    weak var containerView: VideoContainerView?
+
     override func mouseDown(with event: NSEvent) {
         isTracking = true
+        containerView?.sliderBeganTracking()
         super.mouseDown(with: event)   // blocks until mouse-up
         isTracking = false
+        containerView?.sliderEndedTracking()
     }
 }

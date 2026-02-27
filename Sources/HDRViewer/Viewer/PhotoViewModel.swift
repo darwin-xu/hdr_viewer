@@ -21,6 +21,7 @@ final class PhotoViewModel: ObservableObject {
     @Published private(set) var currentFolderURL: URL?
     @Published private(set) var treeStartPoints: [URL] = []
     @Published private(set) var selectedTreeFolderURL: URL?
+    @Published private(set) var isTranscoding = false
     @Published var zoomCommand: ZoomCommand?
     @Published var lastErrorMessage: String?
 
@@ -155,19 +156,45 @@ final class PhotoViewModel: ObservableObject {
     private func startLoadingCurrentImage() {
         loadTask?.cancel()
         preloadTask?.cancel()
+        // Kill any in-progress ffmpeg process immediately
+        TranscodeService.shared.cancelCurrent()
+        isTranscoding = false
         guard let photo = currentPhoto else { return }
 
         // --- Video path: no image decode needed ---
         if photo.isVideo {
             currentImage = nil
             currentCIImage = nil
-            currentVideoURL = photo.url
+            currentVideoURL = nil   // clear so UI doesn't show stale video
             currentMetadata = nil   // clear stale metadata so view doesn't show wrong badge
 
             let url = photo.url
             let metadataService = self.metadataService
+            let needsTranscode = TranscodeService.needsTranscode(url)
+
+            if needsTranscode { isTranscoding = true }
 
             loadTask = Task {
+                let playableURL: URL
+                if needsTranscode {
+                    do {
+                        playableURL = try await Task.detached(priority: .userInitiated) {
+                            try TranscodeService.shared.playableURL(for: url)
+                        }.value
+                    } catch {
+                        guard !Task.isCancelled else { return }
+                        isTranscoding = false
+                        log.error("Transcode failed for \(photo.fileName): \(error.localizedDescription)", source: "ViewModel")
+                        lastErrorMessage = error.localizedDescription
+                        return
+                    }
+                    guard !Task.isCancelled else { return }
+                    isTranscoding = false
+                } else {
+                    playableURL = url
+                }
+
+                currentVideoURL = playableURL
                 currentMetadata = metadataService.readMetadata(from: url)
                 log.info("Loaded video metadata for \(photo.fileName), isHDR=\(currentMetadata?.isHDRVideo ?? false)", source: "ViewModel")
             }
