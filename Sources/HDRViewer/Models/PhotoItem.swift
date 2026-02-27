@@ -34,7 +34,7 @@ struct PhotoItem: Identifiable, Hashable {
     ]
 
     static let videoExtensions: Set<String> = [
-        "mov", "mp4"
+        "mov", "mp4", "mts", "m2ts"
     ]
 
     static let rawExtensions: Set<String> = [
