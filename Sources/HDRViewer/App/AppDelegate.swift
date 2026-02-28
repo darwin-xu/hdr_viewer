@@ -7,7 +7,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         NSApp.setActivationPolicy(.regular)
 
-        if let icon = NSImage(systemSymbolName: "photo.on.rectangle.angled", accessibilityDescription: "HDR Viewer") {
+        if let iconURL = Bundle.module.url(forResource: "AppIcon", withExtension: "png"),
+           let icon = NSImage(contentsOf: iconURL) {
             NSApp.applicationIconImage = icon
         }
 
