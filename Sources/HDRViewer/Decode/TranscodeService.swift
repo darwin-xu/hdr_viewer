@@ -57,13 +57,13 @@ final class TranscodeService {
 
     // MARK: - Public API
 
-    /// Try a fast remux first.  Returns the playable URL immediately if
-    /// remux succeeds (or cached), otherwise returns `nil` — caller
-    /// should then call `transcodeProgressively`.
+    /// Check cache for a previously transcoded file.
+    /// Returns the playable URL immediately on cache hit, otherwise
+    /// returns `nil` — caller should then call `transcodeProgressively`.
     func tryFastPath(for url: URL) throws -> URL? {
         guard Self.needsTranscode(url) else { return url }
 
-        // Check cache
+        // Check in-memory cache
         lock.lock()
         if let cached = cache[url] {
             lock.unlock()
@@ -75,12 +75,8 @@ final class TranscodeService {
             lock.unlock()
         }
 
-        guard let ffmpegPath = findFFmpeg() else {
-            throw TranscodeError.ffmpegNotFound
-        }
-
+        // Check disk (previous session left a result)
         let outURL = outputURL(for: url)
-
         if FileManager.default.fileExists(atPath: outURL.path) {
             lock.lock()
             cache[url] = outURL
@@ -88,46 +84,17 @@ final class TranscodeService {
             return outURL
         }
 
-        // Try stream-copy (remux) — instant for H.264 FLV
-        // Skip remux for formats where stream-copy is known to fail
-        // (e.g. WMV3/WMV2 → MP4 is impossible). This avoids a slow
-        // read over the network just to get a guaranteed failure.
-        let ext = url.pathExtension.lowercased()
-        if Self.remuxSkipExtensions.contains(ext) {
-            log.info("Skipping remux for .\(ext) (codecs not MP4-compatible), needs re-encode", source: "Transcode")
-            return nil
-        }
-
-        log.info("Trying remux (stream copy) for \(url.lastPathComponent)", source: "Transcode")
-        let remuxOK = try runFFmpeg(
-            path: ffmpegPath,
-            arguments: [
-                "-nostdin", "-y", "-i", url.path,
-                "-c", "copy",
-                "-movflags", "+faststart",
-                "-loglevel", "warning",
-                outURL.path
-            ]
-        )
-
-        if remuxOK {
-            log.info("Remux succeeded for \(url.lastPathComponent)", source: "Transcode")
-            lock.lock()
-            cache[url] = outURL
-            lock.unlock()
-            return outURL
-        }
-
-        // Remux failed — caller should use progressive transcode
-        log.info("Remux failed for \(url.lastPathComponent), needs re-encode", source: "Transcode")
-        try? FileManager.default.removeItem(at: outURL)
+        // No cache — caller should use progressive transcode
         return nil
     }
 
-    /// Start a background re-encode that produces a fragmented MP4.
-    /// Returns the output URL immediately — the file will be written
-    /// progressively and AVPlayer can start playing once the first
-    /// fragments appear.
+    /// Start a background transcode that produces a fragmented MP4.
+    /// The file is written progressively — AVPlayer can start playing
+    /// once the first fragments appear on disk.
+    ///
+    /// **Strategy**: for formats with MP4-compatible codecs (e.g. .insv
+    /// with H.264/H.265), try stream-copy first (near-instant output).
+    /// Falls back to hardware/software re-encode if stream-copy fails.
     ///
     /// Call from a detached Task; the method blocks until ffmpeg exits
     /// (or is cancelled).  Check `Task.isCancelled` periodically.
@@ -139,6 +106,37 @@ final class TranscodeService {
         let outURL = outputURL(for: url)
         try? FileManager.default.removeItem(at: outURL)
 
+        isBackgroundTranscoding = true
+        defer { isBackgroundTranscoding = false }
+
+        let ext = url.pathExtension.lowercased()
+
+        // --- Attempt 1: progressive stream-copy (remux) ---
+        // Skip for codecs known to be MP4-incompatible (WMV3, VP6, etc.).
+        // For everything else (e.g. .insv H.264/H.265), stream-copy
+        // produces playable fragmented output almost instantly.
+        if !Self.remuxSkipExtensions.contains(ext) {
+            log.info("Trying progressive stream-copy for \(url.lastPathComponent)", source: "Transcode")
+            let copyOK = try runFFmpeg(path: ffmpegPath, arguments: [
+                "-nostdin", "-y", "-i", url.path,
+                "-c", "copy",
+                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-loglevel", "warning",
+                outURL.path
+            ])
+            if copyOK {
+                log.info("Progressive stream-copy complete: \(outURL.lastPathComponent)", source: "Transcode")
+                lock.lock()
+                cache[url] = outURL
+                lock.unlock()
+                return outURL
+            }
+            // Stream-copy failed (incompatible codec) — fall through to re-encode
+            try? FileManager.default.removeItem(at: outURL)
+            log.info("Stream-copy failed for \(url.lastPathComponent), falling back to re-encode", source: "Transcode")
+        }
+
+        // --- Attempt 2: progressive re-encode ---
         // Try hardware encoder first, fall back to software
         let encoderArgs = hasVideoToolbox(ffmpegPath: ffmpegPath)
             ? ["-c:v", "h264_videotoolbox", "-q:v", "65"]     // HW: quality 65 ≈ high quality
@@ -155,9 +153,6 @@ final class TranscodeService {
             "-loglevel", "warning",
             outURL.path
         ]
-
-        isBackgroundTranscoding = true
-        defer { isBackgroundTranscoding = false }
 
         let ok = try runFFmpeg(path: ffmpegPath, arguments: args)
 
