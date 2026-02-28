@@ -12,7 +12,10 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "HDRViewer",
-            path: "Sources/HDRViewer"
+            path: "Sources/HDRViewer",
+            resources: [
+                .process("Resources")
+            ]
         ),
         .testTarget(
             name: "HDRViewerTests",
