@@ -653,7 +653,7 @@ final class VideoContainerView: NSView {
         if coordinator?.projection.is360 == true {
             let delta = Float(event.scrollingDeltaY) * 0.5  // degrees per scroll unit
             coordinator?.panoFOV -= delta
-            coordinator?.panoFOV = min(120, max(30, coordinator?.panoFOV ?? 90))
+            coordinator?.panoFOV = min(180, max(20, coordinator?.panoFOV ?? 100))
             return
         }
         super.scrollWheel(with: event)

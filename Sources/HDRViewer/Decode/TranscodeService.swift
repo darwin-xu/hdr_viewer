@@ -133,7 +133,8 @@ final class TranscodeService {
             } else {
                 args += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
             }
-            args += ["-c:a", "aac", "-b:a", "128k", "-loglevel", "warning", outURL.path]
+            args += ["-c:a", "aac", "-b:a", "128k",
+                     "-loglevel", "warning", outURL.path]
 
             let ok = try runFFmpeg(path: ffmpegPath, arguments: args)
             guard ok else {

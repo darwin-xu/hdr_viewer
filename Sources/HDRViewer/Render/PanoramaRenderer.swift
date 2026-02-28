@@ -173,15 +173,24 @@ extension PanoramaRenderer {
     }
 
     // ─── Helper: compute world-space ray from screen UV and camera ───
+    // Uses **stereographic** projection instead of rectilinear:
+    //   r = 2·tan(θ/2)  ⟹  θ = 2·atan(r/2)
+    // This is conformal (preserves local shapes), produces much less
+    // edge distortion at wide FOV, and can represent up to ~360°.
     static float3 screenToWorldRay(float2 uv, constant PanoUniforms &u) {
         float2 ndc = uv * 2.0 - 1.0;
+        // Stereographic scale: S = 2·tan(fov/4)
         float fovRad = u.fov * M_PI_F / 180.0;
-        float tanHalf = tan(fovRad * 0.5);
-        float3 dir = normalize(float3(
-            ndc.x * u.aspect * tanHalf,
-            ndc.y * tanHalf,
-            -1.0
-        ));
+        float S = 2.0 * tan(fovRad * 0.25);
+        float2 scaled = float2(ndc.x * u.aspect * S, ndc.y * S);
+        float r = length(scaled);
+        // θ = 2·atan(r/2) — stereographic inverse
+        float theta = 2.0 * atan(r * 0.5);
+        // Build local camera-space direction from θ and the 2D direction
+        float sinT = sin(theta);
+        float cosT = cos(theta);
+        float2 unit = (r > 1e-6) ? (scaled / r) : float2(0.0, 0.0);
+        float3 dir = float3(sinT * unit.x, sinT * unit.y, -cosT);
         // Pitch (X axis)
         float cp = cos(u.pitch), sp = sin(u.pitch);
         float3 d1 = float3(dir.x,
@@ -286,8 +295,9 @@ extension PanoramaRenderer {
         float4 colF = tex.sample(s, uvF);
         float4 colR = tex.sample(s, uvR);
 
-        // Blend weight: prefer the lens whose axis is closer to the ray.
-        // Use smooth blending in the overlap zone (~10° around the seam).
+        // Blend weight: 1 = fully front, 0 = fully rear.
+        // Uses smoothstep on theta from lens axis for soft crossfade
+        // in the overlap region near the equator.
         float wF = smoothstep(maxTheta, maxTheta - 0.18, thetaF);
         float wR = smoothstep(maxTheta, maxTheta - 0.18, thetaR);
 
