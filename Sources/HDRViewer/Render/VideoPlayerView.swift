@@ -16,6 +16,10 @@ struct VideoPlayerView: NSViewRepresentable {
     let url: URL
     let hdrBoostEnabled: Bool
     let hdrBoostIntensity: Double
+    /// Authoritative duration from ffprobe (seconds). When set, this
+    /// overrides whatever AVPlayer reports (which can be wrong for
+    /// progressive / fragmented MP4).
+    var knownDuration: Double?
 
     func makeCoordinator() -> VideoPlayerCoordinator {
         VideoPlayerCoordinator()
@@ -25,6 +29,7 @@ struct VideoPlayerView: NSViewRepresentable {
         let coord = context.coordinator
         coord.hdrBoostEnabled = hdrBoostEnabled
         coord.hdrBoostIntensity = hdrBoostIntensity
+        coord.knownDuration = knownDuration
         coord.loadVideo(url: url)
         return coord.containerView
     }
@@ -33,8 +38,14 @@ struct VideoPlayerView: NSViewRepresentable {
         let coord = context.coordinator
         coord.hdrBoostEnabled = hdrBoostEnabled
         coord.hdrBoostIntensity = hdrBoostIntensity
+        coord.knownDuration = knownDuration
         if coord.currentURL != url {
             coord.loadVideo(url: url)
+        }
+        // If known duration arrives after loadVideo (e.g. ffprobe completes
+        // while progressive playback already started), push it to the UI.
+        if let kd = knownDuration, kd > 0, abs(coord.duration - kd) > 0.5 {
+            coord.setAuthoritativeDuration(kd)
         }
     }
 
@@ -52,6 +63,9 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
     private(set) var currentURL: URL?
     var hdrBoostEnabled = false
     var hdrBoostIntensity = 0.45
+    /// Authoritative duration from ffprobe. When set, takes priority
+    /// over whatever AVPlayer reports.
+    var knownDuration: Double?
 
     private var player: AVPlayer?
     private var videoOutput: AVPlayerItemVideoOutput?
@@ -68,6 +82,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
+    private var durationObserver: NSKeyValueObservation?
     private(set) var duration: Double = 0
     private(set) var isPlaying = false
     private var wasPlayingBeforeSeek = false
@@ -144,10 +159,34 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
             videoOrientation = .up
         }
 
-        duration = CMTimeGetSeconds(asset.duration)
+        // Use authoritative duration from ffprobe if available;
+        // otherwise fall back to AVAsset (may be 0 for progressive streams).
+        if let kd = knownDuration, kd > 0 {
+            duration = kd
+        } else {
+            let avDur = CMTimeGetSeconds(asset.duration)
+            duration = (avDur.isFinite && avDur > 0) ? avDur : 0
+        }
 
         let p = AVPlayer(playerItem: item)
         player = p
+
+        // KVO: update duration when AVPlayer resolves it (fragmented MP4
+        // with empty_moov starts with unknown duration; AVPlayer fills it
+        // in as it reads more fragments). Skip if we already have an
+        // authoritative duration from ffprobe.
+        durationObserver = item.observe(\.duration, options: [.new]) { [weak self] item, _ in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // Don't override an authoritative ffprobe duration
+                if let kd = self.knownDuration, kd > 0 { return }
+                let d = CMTimeGetSeconds(item.duration)
+                if d.isFinite && d > 0 && d != self.duration {
+                    self.duration = d
+                    self.containerView.updateDuration(d)
+                }
+            }
+        }
 
         let interval = CMTime(seconds: 0.25, preferredTimescale: 600)
         timeObserver = p.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
@@ -166,6 +205,14 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         containerView.updateDuration(duration)
         containerView.updateTime(0)
         containerView.updatePlayState(false)
+    }
+
+    /// Update duration from an authoritative source (ffprobe).
+    func setAuthoritativeDuration(_ dur: Double) {
+        guard dur > 0 else { return }
+        knownDuration = dur
+        duration = dur
+        containerView.updateDuration(dur)
     }
 
     func togglePlayPause() {
@@ -224,6 +271,8 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         timeObserver = nil
         if let end = endObserver { NotificationCenter.default.removeObserver(end) }
         endObserver = nil
+        durationObserver?.invalidate()
+        durationObserver = nil
         player?.pause()
         player = nil
         videoOutput = nil

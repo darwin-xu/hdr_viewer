@@ -158,7 +158,8 @@ struct ContentView: View {
                     VideoPlayerView(
                         url: videoURL,
                         hdrBoostEnabled: hdrBoostEnabled && currentSourceType != .videoHDR,
-                        hdrBoostIntensity: hdrBoostIntensity
+                        hdrBoostIntensity: hdrBoostIntensity,
+                        knownDuration: viewModel.currentVideoDuration
                     )
                         .frame(width: proxy.size.width, height: proxy.size.height)
                 } else if let ciImage = viewModel.currentCIImage {

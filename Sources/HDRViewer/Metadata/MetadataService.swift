@@ -38,10 +38,10 @@ extension PhotoMetadata {
 }
 
 final class MetadataService: @unchecked Sendable {
-    func readMetadata(from url: URL) -> PhotoMetadata {
+    func readMetadata(from url: URL, overrideDuration: Double? = nil) -> PhotoMetadata {
         let ext = url.pathExtension.lowercased()
-        if PhotoItem.videoExtensions.contains(ext) {
-            return readVideoMetadata(from: url)
+        if PhotoItem.videoExtensions.contains(ext) || ext == "mp4" {
+            return readVideoMetadata(from: url, overrideDuration: overrideDuration)
         }
         return readImageMetadata(from: url)
     }
@@ -74,7 +74,7 @@ final class MetadataService: @unchecked Sendable {
 
     // MARK: - Video metadata
 
-    private func readVideoMetadata(from url: URL) -> PhotoMetadata {
+    private func readVideoMetadata(from url: URL, overrideDuration: Double? = nil) -> PhotoMetadata {
         let asset = AVAsset(url: url)
         let videoTracks = asset.tracks(withMediaType: .video)
         let audioTracks = asset.tracks(withMediaType: .audio)
@@ -86,7 +86,14 @@ final class MetadataService: @unchecked Sendable {
         let width = Int(abs(transformedSize.width))
         let height = Int(abs(transformedSize.height))
 
-        let duration = CMTimeGetSeconds(asset.duration)
+        let avDuration = CMTimeGetSeconds(asset.duration)
+        // Prefer override (e.g. from ffprobe) over AVAsset duration,
+        // which may be inaccurate for fragmented/progressive MP4.
+        let duration: Double? = {
+            if let od = overrideDuration, od > 0 { return od }
+            if avDuration.isFinite && avDuration > 0 { return avDuration }
+            return nil
+        }()
         let frameRate: Double? = videoTrack.map { Double($0.nominalFrameRate) }
         let videoBitRate: Double? = videoTrack.map { Double($0.estimatedDataRate) }
 
@@ -115,7 +122,7 @@ final class MetadataService: @unchecked Sendable {
             height: height > 0 ? height : nil,
             cameraModel: nil, lensModel: nil, iso: nil,
             exposureTime: nil, fNumber: nil, focalLength: nil,
-            duration: duration.isFinite && duration > 0 ? duration : nil,
+            duration: duration,
             videoCodec: videoCodec,
             audioCodec: audioCodec,
             frameRate: frameRate,

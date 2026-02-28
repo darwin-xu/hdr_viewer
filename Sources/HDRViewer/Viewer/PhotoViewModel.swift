@@ -17,6 +17,7 @@ final class PhotoViewModel: ObservableObject {
     @Published private(set) var currentImage: NSImage?
     @Published private(set) var currentCIImage: CIImage?
     @Published private(set) var currentVideoURL: URL?
+    @Published private(set) var currentVideoDuration: Double?
     @Published private(set) var currentMetadata: PhotoMetadata?
     @Published private(set) var currentFolderURL: URL?
     @Published private(set) var treeStartPoints: [URL] = []
@@ -166,6 +167,7 @@ final class PhotoViewModel: ObservableObject {
             currentImage = nil
             currentCIImage = nil
             currentVideoURL = nil   // clear so UI doesn't show stale video
+            currentVideoDuration = nil
             currentMetadata = nil   // clear stale metadata so view doesn't show wrong badge
 
             let url = photo.url
@@ -178,6 +180,16 @@ final class PhotoViewModel: ObservableObject {
                 if needsTranscode {
                     log.debug("Starting transcode flow for \(photo.fileName)", source: "ViewModel")
 
+                    // Probe accurate duration from the original file via ffprobe.
+                    // This works on formats AVFoundation can't read (e.g. .insv).
+                    let probedDuration = await Task.detached(priority: .utility) {
+                        TranscodeService.shared.probeDuration(for: url)
+                    }.value
+                    guard !Task.isCancelled else { return }
+                    if let pd = probedDuration {
+                        currentVideoDuration = pd
+                    }
+
                     // --- Step 1: Try fast path (cache hit or remux) ---
                     do {
                         let fastURL = try await Task.detached(priority: .userInitiated) {
@@ -189,7 +201,7 @@ final class PhotoViewModel: ObservableObject {
                             // Remux or cache hit — play immediately
                             isTranscoding = false
                             currentVideoURL = fastURL
-                            currentMetadata = metadataService.readMetadata(from: url)
+                            currentMetadata = metadataService.readMetadata(from: fastURL, overrideDuration: probedDuration)
                             log.info("Fast-path video ready for \(photo.fileName)", source: "ViewModel")
                             return
                         }
@@ -269,7 +281,9 @@ final class PhotoViewModel: ObservableObject {
                     // Start playback — ffmpeg may still be writing in the background
                     isTranscoding = false
                     currentVideoURL = outputURL
-                    currentMetadata = metadataService.readMetadata(from: url)
+                    // Use ffprobe duration for metadata (AVFoundation can't read
+                    // partial fragmented MP4 or .insv files accurately)
+                    currentMetadata = metadataService.readMetadata(from: outputURL, overrideDuration: probedDuration)
                     log.info("Progressive playback started for \(photo.fileName), transcode continuing in background", source: "ViewModel")
 
                     // Wait for encode to finish (or be cancelled)
