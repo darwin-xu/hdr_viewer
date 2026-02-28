@@ -20,6 +20,8 @@ struct VideoPlayerView: NSViewRepresentable {
     /// overrides whatever AVPlayer reports (which can be wrong for
     /// progressive / fragmented MP4).
     var knownDuration: Double?
+    /// Video projection type — determines rendering mode.
+    var projection: VideoProjection = .flat
 
     func makeCoordinator() -> VideoPlayerCoordinator {
         VideoPlayerCoordinator()
@@ -30,6 +32,7 @@ struct VideoPlayerView: NSViewRepresentable {
         coord.hdrBoostEnabled = hdrBoostEnabled
         coord.hdrBoostIntensity = hdrBoostIntensity
         coord.knownDuration = knownDuration
+        coord.projection = projection
         coord.loadVideo(url: url)
         return coord.containerView
     }
@@ -39,6 +42,7 @@ struct VideoPlayerView: NSViewRepresentable {
         coord.hdrBoostEnabled = hdrBoostEnabled
         coord.hdrBoostIntensity = hdrBoostIntensity
         coord.knownDuration = knownDuration
+        coord.projection = projection
         if coord.currentURL != url {
             coord.loadVideo(url: url)
         }
@@ -66,6 +70,9 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
     /// Authoritative duration from ffprobe. When set, takes priority
     /// over whatever AVPlayer reports.
     var knownDuration: Double?
+    /// Video projection type — determines rendering mode
+    /// (flat, equirectangular, or dual-fisheye).
+    var projection: VideoProjection = .flat
 
     private var player: AVPlayer?
     private var videoOutput: AVPlayerItemVideoOutput?
@@ -73,6 +80,16 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
     private var commandQueue: MTLCommandQueue?
     private var lastCIImage: CIImage?
     private var videoOrientation: CGImagePropertyOrientation = .up
+
+    // --- 360° panorama state ---
+    private var panoramaRenderer: PanoramaRenderer?
+    private var equirectTexture: MTLTexture?
+    /// Camera yaw in radians (positive = look right).
+    var panoYaw: Float = 0
+    /// Camera pitch in radians (positive = look up), clamped ±π/2.
+    var panoPitch: Float = 0
+    /// Vertical field-of-view in degrees.
+    var panoFOV: Float = 90
 
     // --- Frame-skip state ---
     private var cachedBoostEnabled = false
@@ -285,6 +302,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard let ciContext, let commandQueue else { return }
+        let device = view.device!
 
         // ── 1. Pull latest video frame ──────────────────────────────
         var gotNewFrame = false
@@ -293,9 +311,6 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
             let itemTime = output.itemTime(forHostTime: hostTime)
             if output.hasNewPixelBuffer(forItemTime: itemTime),
                let pb = output.copyPixelBuffer(forItemTime: itemTime, itemTimeForDisplay: nil) {
-                // CIImage(cvPixelBuffer:) automatically reads the correct
-                // color space from CVAttachments set by AVFoundation — no
-                // manual tagging needed.
                 lastCIImage = CIImage(cvPixelBuffer: pb).oriented(videoOrientation)
                 gotNewFrame = true
             }
@@ -305,32 +320,90 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         let boostChanged = hdrBoostEnabled != cachedBoostEnabled
                         || abs(hdrBoostIntensity - cachedBoostIntensity) > 0.001
         let sizeChanged  = view.drawableSize != lastDrawableSize
-        let needsRender  = gotNewFrame || boostChanged || sizeChanged || !hasRenderedContent
+        // In 360° mode we always re-render because the user may be
+        // dragging the view (camera yaw/pitch change every frame).
+        let needsRender  = gotNewFrame || boostChanged || sizeChanged || !hasRenderedContent || projection.is360
 
-        // Nothing changed — the previously-presented drawable is still
-        // visible on screen.  Skip all GPU work.
         if !needsRender { return }
 
-        // Update tracking state
         cachedBoostEnabled   = hdrBoostEnabled
         cachedBoostIntensity = hdrBoostIntensity
         lastDrawableSize     = view.drawableSize
 
-        // ── 3. Render directly to drawable ──────────────────────────
+        // ── 3. Render ───────────────────────────────────────────────
         guard let drawable = view.currentDrawable,
               let commandBuffer = commandQueue.makeCommandBuffer()
         else { return }
 
-        // Clear to black
-        let renderPass = MTLRenderPassDescriptor()
-        renderPass.colorAttachments[0].texture = drawable.texture
-        renderPass.colorAttachments[0].loadAction = .clear
-        renderPass.colorAttachments[0].storeAction = .store
-        renderPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
-        let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass)
-        encoder?.endEncoding()
+        if projection.is360, var image = lastCIImage {
+            // ── 360° panorama: two-pass rendering ───────────────────
+            // Pass 1: Render CIImage (+ HDR boost) to offscreen texture
+            if hdrBoostEnabled {
+                image = Self.applyHDRBoost(to: image, intensity: hdrBoostIntensity)
+            }
 
-        if var image = lastCIImage {
+            let extent = image.extent
+            let texW = Int(extent.width)
+            let texH = Int(extent.height)
+
+            // Lazily create / resize offscreen equirectangular texture
+            if panoramaRenderer == nil {
+                do {
+                    panoramaRenderer = try PanoramaRenderer(device: device, pixelFormat: view.colorPixelFormat)
+                } catch {
+                    NSLog("PanoramaRenderer init failed: \(error)")
+                }
+            }
+            guard let panoRenderer = panoramaRenderer else {
+                commandBuffer.commit()
+                return
+            }
+            equirectTexture = panoRenderer.offscreenTexture(
+                width: texW, height: texH, existing: equirectTexture
+            )
+            guard let offscreen = equirectTexture else {
+                commandBuffer.commit()
+                return
+            }
+
+            let edrCS = CGColorSpace(name: CGColorSpace.extendedLinearDisplayP3)!
+            ciContext.render(
+                image, to: offscreen, commandBuffer: commandBuffer,
+                bounds: image.extent,
+                colorSpace: edrCS
+            )
+
+            // Pass 2: Perspective projection from equirectangular texture
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = drawable.texture
+            renderPass.colorAttachments[0].loadAction = .clear
+            renderPass.colorAttachments[0].storeAction = .store
+            renderPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+
+            if let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) {
+                let panoMode: PanoProjectionMode = projection == .dualFisheye ? .dualFisheye : .equirectangular
+                panoRenderer.draw(
+                    encoder: encoder,
+                    texture: offscreen,
+                    yaw: panoYaw,
+                    pitch: panoPitch,
+                    fov: panoFOV,
+                    drawableSize: view.drawableSize,
+                    mode: panoMode
+                )
+                encoder.endEncoding()
+            }
+        } else if var image = lastCIImage {
+            // ── Flat video: single-pass CIContext render ────────────
+            // Clear to black
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = drawable.texture
+            renderPass.colorAttachments[0].loadAction = .clear
+            renderPass.colorAttachments[0].storeAction = .store
+            renderPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass)
+            encoder?.endEncoding()
+
             if hdrBoostEnabled {
                 image = Self.applyHDRBoost(to: image, intensity: hdrBoostIntensity)
             }
@@ -339,6 +412,15 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
             ciContext.render(fitted, to: drawable.texture, commandBuffer: commandBuffer,
                             bounds: CGRect(origin: .zero, size: view.drawableSize),
                             colorSpace: edrCS)
+        } else {
+            // No image yet — clear to black
+            let renderPass = MTLRenderPassDescriptor()
+            renderPass.colorAttachments[0].texture = drawable.texture
+            renderPass.colorAttachments[0].loadAction = .clear
+            renderPass.colorAttachments[0].storeAction = .store
+            renderPass.colorAttachments[0].clearColor = MTLClearColor(red: 0, green: 0, blue: 0, alpha: 1)
+            let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass)
+            encoder?.endEncoding()
         }
 
         commandBuffer.present(drawable)
@@ -420,6 +502,11 @@ final class VideoContainerView: NSView {
     private var controlsTimer: Timer?
     private var trackingArea: NSTrackingArea?
     private var duration: Double = 0
+
+    /// Whether 360° panorama drag interaction is active.
+    private var isPanoDragging = false
+    /// Last mouse position during a panorama drag.
+    private var lastPanoDragPoint: NSPoint = .zero
 
     func setupControls() {
         wantsLayer = true
@@ -519,6 +606,60 @@ final class VideoContainerView: NSView {
     override func mouseEntered(with event: NSEvent) { showControls() }
     override func mouseMoved(with event: NSEvent)   { showControls() }
     override func mouseExited(with event: NSEvent)   { scheduleHide(after: 1) }
+
+    // MARK: - 360° panorama mouse interaction
+
+    override func mouseDown(with event: NSEvent) {
+        // If in 360° mode and the click is NOT on the controls bar, start drag
+        if coordinator?.projection.is360 == true {
+            let loc = convert(event.locationInWindow, from: nil)
+            if !controlsBar.frame.contains(loc) {
+                isPanoDragging = true
+                lastPanoDragPoint = loc
+                return
+            }
+        }
+        super.mouseDown(with: event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        if isPanoDragging, let coord = coordinator {
+            let loc = convert(event.locationInWindow, from: nil)
+            let dx = Float(loc.x - lastPanoDragPoint.x)
+            let dy = Float(loc.y - lastPanoDragPoint.y)
+            lastPanoDragPoint = loc
+
+            // Sensitivity: ~0.3° per pixel
+            let sensitivity: Float = 0.005  // radians per pixel
+            coord.panoYaw -= dx * sensitivity
+            coord.panoPitch += dy * sensitivity
+            // Clamp pitch to ±π/2
+            coord.panoPitch = min(.pi / 2, max(-.pi / 2, coord.panoPitch))
+            return
+        }
+        super.mouseDragged(with: event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        if isPanoDragging {
+            isPanoDragging = false
+            return
+        }
+        super.mouseUp(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // In 360° mode, scroll wheel adjusts FOV (zoom)
+        if coordinator?.projection.is360 == true {
+            let delta = Float(event.scrollingDeltaY) * 0.5  // degrees per scroll unit
+            coordinator?.panoFOV -= delta
+            coordinator?.panoFOV = min(120, max(30, coordinator?.panoFOV ?? 90))
+            return
+        }
+        super.scrollWheel(with: event)
+    }
+
+    override var acceptsFirstResponder: Bool { true }
 
     // MARK: - Actions
 
