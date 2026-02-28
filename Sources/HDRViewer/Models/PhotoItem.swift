@@ -35,13 +35,13 @@ struct PhotoItem: Identifiable, Hashable {
 
     static let videoExtensions: Set<String> = [
         "mov", "mp4", "mts", "m2ts", "3gp", "mpg", "avi",
-        "flv", "wmv"
+        "flv", "wmv", "insv"
     ]
 
     /// Formats that AVFoundation cannot decode natively and need
     /// ffmpeg transcoding to a temporary MP4 before playback.
     static let transcodeRequiredExtensions: Set<String> = [
-        "flv", "wmv"
+        "flv", "wmv", "insv"
     ]
 
     static let rawExtensions: Set<String> = [
