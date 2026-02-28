@@ -191,6 +191,84 @@ final class TranscodeService {
 
     // MARK: - Helpers
 
+    /// Use ffprobe (or ffmpeg) to get the accurate duration of a media file.
+    /// Returns the duration in seconds, or nil if it can't be determined.
+    /// This works on formats AVFoundation can't read (e.g. .insv).
+    func probeDuration(for url: URL) -> Double? {
+        // Try ffprobe first (comes with ffmpeg installations)
+        let ffmpegPath = findFFmpeg()
+        let ffprobePath: String? = {
+            if let fp = ffmpegPath {
+                let dir = (fp as NSString).deletingLastPathComponent
+                let probe = (dir as NSString).appendingPathComponent("ffprobe")
+                if FileManager.default.isExecutableFile(atPath: probe) { return probe }
+            }
+            // Also check common paths
+            for path in ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"] {
+                if FileManager.default.isExecutableFile(atPath: path) { return path }
+            }
+            return nil
+        }()
+
+        if let ffprobePath {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: ffprobePath)
+            process.arguments = [
+                "-v", "quiet",
+                "-print_format", "json",
+                "-show_format",
+                url.path
+            ]
+            process.standardInput = FileHandle.nullDevice
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = FileHandle.nullDevice
+            try? process.run()
+            process.waitUntilExit()
+
+            if process.terminationStatus == 0,
+               let data = try? pipe.fileHandleForReading.readToEnd(),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let format = json["format"] as? [String: Any],
+               let durStr = format["duration"] as? String,
+               let dur = Double(durStr), dur > 0 {
+                log.debug("ffprobe duration for \(url.lastPathComponent): \(dur)s", source: "Transcode")
+                return dur
+            }
+        }
+
+        // Fallback: use ffmpeg -i (prints to stderr)
+        if let ffmpegPath {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: ffmpegPath)
+            process.arguments = ["-nostdin", "-i", url.path]
+            process.standardInput = FileHandle.nullDevice
+            process.standardOutput = FileHandle.nullDevice
+            let stderrPipe = Pipe()
+            process.standardError = stderrPipe
+            try? process.run()
+            process.waitUntilExit()
+
+            if let data = try? stderrPipe.fileHandleForReading.readToEnd(),
+               let output = String(data: data, encoding: .utf8) {
+                // Parse "Duration: HH:MM:SS.xx" from ffmpeg output
+                if let range = output.range(of: #"Duration:\s*(\d+):(\d+):(\d+)\.(\d+)"#, options: .regularExpression) {
+                    let match = String(output[range])
+                    let nums = match.components(separatedBy: CharacterSet(charactersIn: ": .")).compactMap { Double($0) }
+                    if nums.count >= 4 {
+                        let dur = nums[0] * 3600 + nums[1] * 60 + nums[2] + nums[3] / 100.0
+                        if dur > 0 {
+                            log.debug("ffmpeg -i duration for \(url.lastPathComponent): \(dur)s", source: "Transcode")
+                            return dur
+                        }
+                    }
+                }
+            }
+        }
+
+        return nil
+    }
+
     func outputURL(for url: URL) -> URL {
         let hash = url.path.data(using: .utf8)!.map { String(format: "%02x", $0) }.suffix(16).joined()
         let baseName = url.deletingPathExtension().lastPathComponent
