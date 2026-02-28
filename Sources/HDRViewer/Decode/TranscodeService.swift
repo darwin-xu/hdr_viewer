@@ -88,13 +88,16 @@ final class TranscodeService {
         return nil
     }
 
-    /// Start a background transcode that produces a fragmented MP4.
+    /// Start a background transcode that produces an MP4.
     /// The file is written progressively — AVPlayer can start playing
     /// once the first fragments appear on disk.
     ///
     /// **Strategy**: for formats with MP4-compatible codecs (e.g. .insv
     /// with H.264/H.265), try stream-copy first (near-instant output).
     /// Falls back to hardware/software re-encode if stream-copy fails.
+    ///
+    /// Stream-copy always adds `-tag:v hvc1` so that Apple's
+    /// AVFoundation can deliver pixel buffers from HEVC content.
     ///
     /// Call from a detached Task; the method blocks until ffmpeg exits
     /// (or is cancelled).  Check `Task.isCancelled` periodically.
@@ -111,36 +114,69 @@ final class TranscodeService {
 
         let ext = url.pathExtension.lowercased()
 
-        // --- Attempt 1: progressive stream-copy (remux) ---
+        // --- Dual-fisheye .insv with separate lens tracks ---
+        // Two video streams must be merged side-by-side (hstack) and
+        // re-encoded so AVPlayer sees a single track.
+        if ext == "insv" && probeVideoStreamCount(for: url) >= 2 {
+            log.info("Merging dual-stream .insv via hstack for \(url.lastPathComponent)", source: "Transcode")
+
+            // Scale each lens to half-resolution for faster encode,
+            // then stack horizontally → 2:1 output.
+            let filter = "[0:v:0]scale=iw/2:ih/2[a];[0:v:1]scale=iw/2:ih/2[b];[a][b]hstack=inputs=2"
+
+            var args: [String] = ["-nostdin", "-y", "-hwaccel", "videotoolbox", "-i", url.path]
+            args += ["-filter_complex", filter]
+            if hasEncoder("hevc_videotoolbox", ffmpegPath: ffmpegPath) {
+                args += ["-c:v", "hevc_videotoolbox", "-q:v", "65", "-tag:v", "hvc1"]
+            } else if hasEncoder("h264_videotoolbox", ffmpegPath: ffmpegPath) {
+                args += ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+            } else {
+                args += ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
+            }
+            args += ["-c:a", "aac", "-b:a", "128k", "-loglevel", "warning", outURL.path]
+
+            let ok = try runFFmpeg(path: ffmpegPath, arguments: args)
+            guard ok else {
+                try? FileManager.default.removeItem(at: outURL)
+                throw TranscodeError.ffmpegFailed(exitCode: -1, message: "Dual-fisheye hstack failed")
+            }
+
+            log.info("Dual-fisheye merge complete: \(outURL.lastPathComponent)", source: "Transcode")
+            lock.lock()
+            cache[url] = outURL
+            lock.unlock()
+            return outURL
+        }
+
+        // --- Attempt 1: stream-copy (remux) ---
         // Skip for codecs known to be MP4-incompatible (WMV3, VP6, etc.).
-        // For everything else (e.g. .insv H.264/H.265), stream-copy
-        // produces playable fragmented output almost instantly.
         if !Self.remuxSkipExtensions.contains(ext) {
-            log.info("Trying progressive stream-copy for \(url.lastPathComponent)", source: "Transcode")
+            log.info("Trying stream-copy for \(url.lastPathComponent)", source: "Transcode")
             let copyOK = try runFFmpeg(path: ffmpegPath, arguments: [
                 "-nostdin", "-y", "-i", url.path,
                 "-c", "copy",
-                "-movflags", "frag_keyframe+empty_moov+default_base_moof",
+                "-tag:v", "hvc1",
                 "-loglevel", "warning",
                 outURL.path
             ])
             if copyOK {
-                log.info("Progressive stream-copy complete: \(outURL.lastPathComponent)", source: "Transcode")
+                log.info("Stream-copy complete: \(outURL.lastPathComponent)", source: "Transcode")
                 lock.lock()
                 cache[url] = outURL
                 lock.unlock()
                 return outURL
             }
-            // Stream-copy failed (incompatible codec) — fall through to re-encode
             try? FileManager.default.removeItem(at: outURL)
             log.info("Stream-copy failed for \(url.lastPathComponent), falling back to re-encode", source: "Transcode")
         }
 
-        // --- Attempt 2: progressive re-encode ---
-        // Try hardware encoder first, fall back to software
-        let encoderArgs = hasVideoToolbox(ffmpegPath: ffmpegPath)
-            ? ["-c:v", "h264_videotoolbox", "-q:v", "65"]     // HW: quality 65 ≈ high quality
-            : ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]  // SW fallback
+        // --- Attempt 2: re-encode ---
+        let encoderArgs: [String]
+        if hasEncoder("h264_videotoolbox", ffmpegPath: ffmpegPath) {
+            encoderArgs = ["-c:v", "h264_videotoolbox", "-q:v", "65"]
+        } else {
+            encoderArgs = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
+        }
 
         log.info("Re-encoding \(url.lastPathComponent) (\(encoderArgs[1]))", source: "Transcode")
 
@@ -148,9 +184,8 @@ final class TranscodeService {
             "-nostdin", "-y", "-i", url.path
         ] + encoderArgs + [
             "-c:a", "aac", "-b:a", "128k",
-            // Fragmented MP4: playable immediately, no moov at end
             "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-            "-loglevel", "warning",
+            "-loglevel", "error",
             outURL.path
         ]
 
@@ -191,26 +226,184 @@ final class TranscodeService {
 
     // MARK: - Helpers
 
+    /// Locate ffprobe – sibling of ffmpeg, then common paths, then $PATH.
+    private func findFFprobe() -> String? {
+        if let fp = findFFmpeg() {
+            let dir = (fp as NSString).deletingLastPathComponent
+            let probe = (dir as NSString).appendingPathComponent("ffprobe")
+            if FileManager.default.isExecutableFile(atPath: probe) { return probe }
+        }
+        for path in ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"] {
+            if FileManager.default.isExecutableFile(atPath: path) { return path }
+        }
+        return nil
+    }
+
+    // MARK: - Projection detection
+
+    /// Probe the first video track's width and height via ffprobe.
+    /// Returns `(width, height)` or `nil` if probing fails.
+    func probeVideoSize(for url: URL) -> (width: Int, height: Int)? {
+        guard let ffprobePath = findFFprobe() else { return nil }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffprobePath)
+        process.arguments = [
+            "-v", "quiet",
+            "-print_format", "json",
+            "-select_streams", "v:0",
+            "-show_entries", "stream=width,height",
+            url.path
+        ]
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let data = try? pipe.fileHandleForReading.readToEnd(),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let streams = json["streams"] as? [[String: Any]],
+              let first = streams.first,
+              let w = first["width"] as? Int,
+              let h = first["height"] as? Int else {
+            return nil
+        }
+        log.debug("Probed video size for \(url.lastPathComponent): \(w)x\(h)", source: "Transcode")
+        return (w, h)
+    }
+
+    /// Count the number of video streams in the file.
+    func probeVideoStreamCount(for url: URL) -> Int {
+        guard let ffprobePath = findFFprobe() else { return 0 }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffprobePath)
+        process.arguments = [
+            "-v", "quiet",
+            "-print_format", "json",
+            "-select_streams", "v",
+            "-show_entries", "stream=index",
+            url.path
+        ]
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0,
+              let data = try? pipe.fileHandleForReading.readToEnd(),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let streams = json["streams"] as? [[String: Any]] else {
+            return 0
+        }
+        log.debug("Video stream count for \(url.lastPathComponent): \(streams.count)", source: "Transcode")
+        return streams.count
+    }
+
+    /// Detect the projection type of a video file.
+    ///
+    /// For `.insv` files:
+    ///   - 2 video streams → dual-fisheye (separate lens tracks)
+    ///   - 1 stream, 2:1 aspect (±10 %) → already-stitched equirectangular
+    ///   - 1 stream, 1:1 aspect (±10 %) → dual-fisheye (side-by-side in one frame)
+    ///   - Otherwise → flat
+    ///
+    /// Other files are checked for spherical metadata via ffprobe.
+    func probeProjection(for url: URL) -> VideoProjection {
+        let ext = url.pathExtension.lowercased()
+
+        if ext == "insv" {
+            let streamCount = probeVideoStreamCount(for: url)
+            if streamCount >= 2 {
+                // Two video streams = one per lens → dual-fisheye
+                log.info("Detected dual-fisheye .insv (\(streamCount) video streams)", source: "Transcode")
+                return .dualFisheye
+            }
+            // Single stream: check dimensions
+            if let size = probeVideoSize(for: url), size.height > 0 {
+                let ratio = Double(size.width) / Double(size.height)
+                if ratio >= 1.8 && ratio <= 2.2 {
+                    log.info("Detected equirectangular .insv (\(size.width)x\(size.height), ratio \(String(format: "%.2f", ratio)))", source: "Transcode")
+                    return .equirectangular
+                }
+                if ratio >= 0.9 && ratio <= 1.1 {
+                    log.info("Detected dual-fisheye .insv single-frame (\(size.width)x\(size.height))", source: "Transcode")
+                    return .dualFisheye
+                }
+            }
+            log.info(".insv projection unclear for \(url.lastPathComponent), assuming equirectangular", source: "Transcode")
+            return .equirectangular
+        }
+
+        // For other formats, query ffprobe for spherical metadata
+        guard let ffprobePath = findFFprobe() else { return .flat }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: ffprobePath)
+        process.arguments = [
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_streams", "-show_format",
+            url.path
+        ]
+        process.standardInput = FileHandle.nullDevice
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
+        process.waitUntilExit()
+
+        guard process.terminationStatus == 0,
+              let data = try? pipe.fileHandleForReading.readToEnd(),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return .flat
+        }
+
+        // Check format-level tags for Google spherical metadata
+        if let format = json["format"] as? [String: Any],
+           let tags = format["tags"] as? [String: Any] {
+            if tags.keys.contains(where: { $0.lowercased().contains("spherical") }) {
+                log.info("Detected equirectangular projection (format tags) for \(url.lastPathComponent)", source: "Transcode")
+                return .equirectangular
+            }
+        }
+
+        // Check stream side_data for projection info
+        if let streams = json["streams"] as? [[String: Any]] {
+            for stream in streams {
+                // Stream-level tags
+                if let tags = stream["tags"] as? [String: Any],
+                   tags.keys.contains(where: { $0.lowercased().contains("spherical") }) {
+                    log.info("Detected equirectangular projection (stream tags) for \(url.lastPathComponent)", source: "Transcode")
+                    return .equirectangular
+                }
+                // Side data (e.g. "Spherical Mapping" side data type)
+                if let sideDataList = stream["side_data_list"] as? [[String: Any]] {
+                    for sd in sideDataList {
+                        if let sdType = sd["side_data_type"] as? String,
+                           sdType.lowercased().contains("spherical") {
+                            log.info("Detected equirectangular projection (side_data) for \(url.lastPathComponent)", source: "Transcode")
+                            return .equirectangular
+                        }
+                        if let proj = sd["projection"] as? String,
+                           proj.lowercased() == "equirectangular" {
+                            log.info("Detected equirectangular projection (projection field) for \(url.lastPathComponent)", source: "Transcode")
+                            return .equirectangular
+                        }
+                    }
+                }
+            }
+        }
+
+        return .flat
+    }
+
     /// Use ffprobe (or ffmpeg) to get the accurate duration of a media file.
     /// Returns the duration in seconds, or nil if it can't be determined.
     /// This works on formats AVFoundation can't read (e.g. .insv).
     func probeDuration(for url: URL) -> Double? {
-        // Try ffprobe first (comes with ffmpeg installations)
-        let ffmpegPath = findFFmpeg()
-        let ffprobePath: String? = {
-            if let fp = ffmpegPath {
-                let dir = (fp as NSString).deletingLastPathComponent
-                let probe = (dir as NSString).appendingPathComponent("ffprobe")
-                if FileManager.default.isExecutableFile(atPath: probe) { return probe }
-            }
-            // Also check common paths
-            for path in ["/opt/homebrew/bin/ffprobe", "/usr/local/bin/ffprobe", "/usr/bin/ffprobe"] {
-                if FileManager.default.isExecutableFile(atPath: path) { return path }
-            }
-            return nil
-        }()
-
-        if let ffprobePath {
+        if let ffprobePath = findFFprobe() {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: ffprobePath)
             process.arguments = [
@@ -238,7 +431,7 @@ final class TranscodeService {
         }
 
         // Fallback: use ffmpeg -i (prints to stderr)
-        if let ffmpegPath {
+        if let ffmpegPath = findFFmpeg() {
             let process = Process()
             process.executableURL = URL(fileURLWithPath: ffmpegPath)
             process.arguments = ["-nostdin", "-i", url.path]
@@ -303,8 +496,8 @@ final class TranscodeService {
         return nil
     }
 
-    /// Check whether h264_videotoolbox is available.
-    private func hasVideoToolbox(ffmpegPath: String) -> Bool {
+    /// Check whether a specific encoder is available in ffmpeg.
+    private func hasEncoder(_ name: String, ffmpegPath: String) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: ffmpegPath)
         process.arguments = ["-nostdin", "-hide_banner", "-encoders"]
@@ -316,7 +509,7 @@ final class TranscodeService {
         process.waitUntilExit()
         guard let data = try? pipe.fileHandleForReading.readToEnd(),
               let output = String(data: data, encoding: .utf8) else { return false }
-        return output.contains("h264_videotoolbox")
+        return output.contains(name)
     }
 
     /// Runs ffmpeg with cancellation support and stderr capture.
@@ -333,9 +526,24 @@ final class TranscodeService {
         process.standardInput = FileHandle.nullDevice
         process.standardOutput = FileHandle.nullDevice
 
-        // Capture stderr for diagnostic logging
+        // Capture stderr for diagnostic logging.
+        // IMPORTANT: drain it asynchronously to prevent pipe-buffer deadlock.
+        // macOS pipe buffers are ~64 KB — if ffmpeg writes more than that
+        // (common with v360 filter warnings) and nobody reads, the process
+        // blocks on write while we block waiting for it to exit → deadlock.
         let stderrPipe = Pipe()
         process.standardError = stderrPipe
+
+        var stderrChunks: [Data] = []
+        let stderrLock = NSLock()
+        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+            let chunk = handle.availableData
+            if !chunk.isEmpty {
+                stderrLock.lock()
+                stderrChunks.append(chunk)
+                stderrLock.unlock()
+            }
+        }
 
         processLock.lock()
         activeProcess = process
@@ -350,6 +558,7 @@ final class TranscodeService {
             if Task.isCancelled {
                 process.terminate()
                 process.waitUntilExit()
+                stderrPipe.fileHandleForReading.readabilityHandler = nil
                 processLock.lock()
                 if activeOperationID == operationID {
                     activeProcess = nil
@@ -365,6 +574,10 @@ final class TranscodeService {
             Thread.sleep(forTimeInterval: 0.05)
         }
 
+        // Stop draining and collect remaining bytes
+        stderrPipe.fileHandleForReading.readabilityHandler = nil
+        let remaining = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
         processLock.lock()
         if activeOperationID == operationID {
             activeProcess = nil
@@ -372,8 +585,12 @@ final class TranscodeService {
         }
         processLock.unlock()
 
-        // Log any stderr output from ffmpeg
-        let stderrData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+        // Assemble captured stderr for logging
+        stderrLock.lock()
+        if !remaining.isEmpty { stderrChunks.append(remaining) }
+        let stderrData = stderrChunks.reduce(Data()) { $0 + $1 }
+        stderrLock.unlock()
+
         if !stderrData.isEmpty,
            let stderrStr = String(data: stderrData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
            !stderrStr.isEmpty {

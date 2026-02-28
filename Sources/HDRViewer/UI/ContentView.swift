@@ -117,6 +117,14 @@ struct ContentView: View {
                             .disabled(!hdrBoostEnabled)
                     }
                 }
+
+                if viewModel.currentVideoProjection.is360 {
+                    Text("360°")
+                        .font(.footnote.weight(.semibold))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(Color.purple.opacity(0.18), in: Capsule())
+                }
             }
 
             Spacer()
@@ -150,7 +158,7 @@ struct ContentView: View {
                     VStack(spacing: 12) {
                         ProgressView()
                             .controlSize(.large)
-                        Text("Transcoding video…")
+                        Text(viewModel.transcodeStatusMessage ?? "Transcoding video…")
                             .foregroundStyle(.white.opacity(0.7))
                             .font(.callout)
                     }
@@ -159,7 +167,8 @@ struct ContentView: View {
                         url: videoURL,
                         hdrBoostEnabled: hdrBoostEnabled && currentSourceType != .videoHDR,
                         hdrBoostIntensity: hdrBoostIntensity,
-                        knownDuration: viewModel.currentVideoDuration
+                        knownDuration: viewModel.currentVideoDuration,
+                        projection: viewModel.currentVideoProjection
                     )
                         .frame(width: proxy.size.width, height: proxy.size.height)
                 } else if let ciImage = viewModel.currentCIImage {

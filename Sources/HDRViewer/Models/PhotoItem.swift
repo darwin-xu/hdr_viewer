@@ -20,6 +20,23 @@ enum HDRBoostMode {
     case video
 }
 
+/// Projection type detected from video metadata or file extension.
+enum VideoProjection {
+    /// Normal flat (rectilinear) video.
+    case flat
+    /// Already stitched equirectangular 360° video.
+    case equirectangular
+    /// Dual-fisheye (e.g. raw Insta360 .insv) — rendered directly via GPU shader.
+    case dualFisheye
+
+    var is360: Bool {
+        switch self {
+        case .equirectangular, .dualFisheye: return true
+        case .flat: return false
+        }
+    }
+}
+
 struct PhotoItem: Identifiable, Hashable {
     let id: URL
     let url: URL

@@ -18,11 +18,13 @@ final class PhotoViewModel: ObservableObject {
     @Published private(set) var currentCIImage: CIImage?
     @Published private(set) var currentVideoURL: URL?
     @Published private(set) var currentVideoDuration: Double?
+    @Published private(set) var currentVideoProjection: VideoProjection = .flat
     @Published private(set) var currentMetadata: PhotoMetadata?
     @Published private(set) var currentFolderURL: URL?
     @Published private(set) var treeStartPoints: [URL] = []
     @Published private(set) var selectedTreeFolderURL: URL?
     @Published private(set) var isTranscoding = false
+    @Published private(set) var transcodeStatusMessage: String?
     @Published var zoomCommand: ZoomCommand?
     @Published var lastErrorMessage: String?
 
@@ -160,6 +162,7 @@ final class PhotoViewModel: ObservableObject {
         // Kill any in-progress ffmpeg process immediately
         TranscodeService.shared.cancelCurrent()
         isTranscoding = false
+        transcodeStatusMessage = nil
         guard let photo = currentPhoto else { return }
 
         // --- Video path: no image decode needed ---
@@ -168,6 +171,7 @@ final class PhotoViewModel: ObservableObject {
             currentCIImage = nil
             currentVideoURL = nil   // clear so UI doesn't show stale video
             currentVideoDuration = nil
+            currentVideoProjection = .flat
             currentMetadata = nil   // clear stale metadata so view doesn't show wrong badge
 
             let url = photo.url
@@ -180,17 +184,21 @@ final class PhotoViewModel: ObservableObject {
                 if needsTranscode {
                     log.debug("Starting transcode flow for \(photo.fileName)", source: "ViewModel")
 
-                    // Probe accurate duration from the original file via ffprobe.
-                    // This works on formats AVFoundation can't read (e.g. .insv).
-                    let probedDuration = await Task.detached(priority: .utility) {
-                        TranscodeService.shared.probeDuration(for: url)
+                    // Probe accurate duration and projection from the original file.
+                    let probeResult: (duration: Double?, projection: VideoProjection) = await Task.detached(priority: .utility) {
+                        let dur = TranscodeService.shared.probeDuration(for: url)
+                        let proj = TranscodeService.shared.probeProjection(for: url)
+                        return (dur, proj)
                     }.value
                     guard !Task.isCancelled else { return }
+                    let probedDuration = probeResult.duration
+                    let projection = probeResult.projection
                     if let pd = probedDuration {
                         currentVideoDuration = pd
                     }
+                    currentVideoProjection = projection
 
-                    // --- Step 1: Try fast path (cache hit or remux) ---
+                    // --- Step 1: Try fast path (cache hit) ---
                     do {
                         let fastURL = try await Task.detached(priority: .userInitiated) {
                             try TranscodeService.shared.tryFastPath(for: url)
@@ -198,7 +206,6 @@ final class PhotoViewModel: ObservableObject {
                         guard !Task.isCancelled else { return }
 
                         if let fastURL {
-                            // Remux or cache hit — play immediately
                             isTranscoding = false
                             currentVideoURL = fastURL
                             currentMetadata = metadataService.readMetadata(from: fastURL, overrideDuration: probedDuration)
@@ -209,90 +216,72 @@ final class PhotoViewModel: ObservableObject {
                         return
                     } catch {
                         guard !Task.isCancelled else { return }
-                        // tryFastPath failed (e.g. ffmpeg not found) —
-                        // log the error but still attempt progressive transcode
                         log.error("Fast path failed for \(photo.fileName): \(error.localizedDescription)", source: "ViewModel")
                     }
 
                     guard !Task.isCancelled else { return }
 
-                    // --- Step 2: Progressive transcode (re-encode) ---
-                    // Start ffmpeg producing fragmented MP4 in background,
-                    // start playback once the first fragments appear.
+                    // --- Step 2: Transcode (stream-copy, hstack, or re-encode) ---
                     let transcodeService = TranscodeService.shared
                     let outputURL = transcodeService.outputURL(for: url)
 
-                    log.info("Starting progressive re-encode for \(photo.fileName)", source: "ViewModel")
+                    log.info("Starting transcode for \(photo.fileName) (projection: \(projection))", source: "ViewModel")
 
-                    // Launch the background encode (runs until done or cancelled)
+                    // Show elapsed time so the user knows it's working
+                    let startTime = Date()
+                    transcodeStatusMessage = "Preparing video…"
+                    let timerTask = Task {
+                        while !Task.isCancelled {
+                            try? await Task.sleep(nanoseconds: 1_000_000_000)
+                            guard !Task.isCancelled else { break }
+                            let elapsed = Int(Date().timeIntervalSince(startTime))
+                            self.transcodeStatusMessage = String(
+                                format: "Preparing video… %d:%02d",
+                                elapsed / 60, elapsed % 60
+                            )
+                        }
+                    }
+
                     let encodeTask = Task.detached(priority: .userInitiated) {
                         try transcodeService.transcodeProgressively(for: url)
                     }
 
-                    // Wait for the file to have enough data to start playback
-                    // (at least 64KB means the first fragments are written)
-                    let minBytes: UInt64 = 64 * 1024
-                    let maxWait = 400  // 400 × 50ms = 20s max wait
-                    var waited = 0
-                    while waited < maxWait {
-                        guard !Task.isCancelled else {
-                            encodeTask.cancel()
-                            return
-                        }
-                        if let attrs = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
-                           let size = attrs[.size] as? UInt64, size >= minBytes {
-                            log.debug("Output file reached \(size) bytes after \(waited * 50)ms", source: "ViewModel")
-                            break
-                        }
-                        try? await Task.sleep(nanoseconds: 50_000_000)  // 50ms
-                        waited += 1
-                    }
-
-                    guard !Task.isCancelled else {
-                        encodeTask.cancel()
+                    // Wait for full transcode to finish before starting playback.
+                    // Stream-copy is near-instant; hstack takes ~12s for 19s video.
+                    do {
+                        _ = try await encodeTask.value
+                    } catch is CancellationError {
+                        timerTask.cancel()
+                        transcodeStatusMessage = nil
+                        return
+                    } catch {
+                        timerTask.cancel()
+                        transcodeStatusMessage = nil
+                        guard !Task.isCancelled else { return }
+                        isTranscoding = false
+                        log.error("Transcode failed for \(photo.fileName): \(error.localizedDescription)", source: "ViewModel")
+                        lastErrorMessage = "Transcode failed: \(error.localizedDescription)"
                         return
                     }
 
-                    // Check if we actually have data (timeout expired with no/too-small file)
-                    let fileExists = FileManager.default.fileExists(atPath: outputURL.path)
-                    let fileSize: UInt64 = (try? FileManager.default.attributesOfItem(atPath: outputURL.path)[.size] as? UInt64) ?? 0
+                    timerTask.cancel()
+                    transcodeStatusMessage = nil
+                    guard !Task.isCancelled else { return }
 
-                    if !fileExists || fileSize < minBytes {
-                        log.error("Transcode timed out for \(photo.fileName) (size=\(fileSize) after \(waited * 50)ms), waiting for completion…", source: "ViewModel")
-                        // Wait for the full encode to finish instead of giving up
-                        do {
-                            _ = try await encodeTask.value
-                        } catch is CancellationError {
-                            return
-                        } catch {
-                            guard !Task.isCancelled else { return }
-                            isTranscoding = false
-                            log.error("Re-encode failed for \(photo.fileName): \(error.localizedDescription)", source: "ViewModel")
-                            lastErrorMessage = "Transcode failed: \(error.localizedDescription)"
-                            return
-                        }
-                    }
-
-                    guard !Task.isCancelled else {
-                        encodeTask.cancel()
-                        return
-                    }
-
-                    // Start playback — ffmpeg may still be writing in the background
                     isTranscoding = false
                     currentVideoURL = outputURL
-                    // Use ffprobe duration for metadata (AVFoundation can't read
-                    // partial fragmented MP4 or .insv files accurately)
                     currentMetadata = metadataService.readMetadata(from: outputURL, overrideDuration: probedDuration)
-                    log.info("Progressive playback started for \(photo.fileName), transcode continuing in background", source: "ViewModel")
-
-                    // Wait for encode to finish (or be cancelled)
-                    _ = try? await encodeTask.value
+                    log.info("Playback started for \(photo.fileName)", source: "ViewModel")
                 } else {
-                    // No transcode needed
+                    // No transcode needed — probe projection for 360° detection
+                    let projection = await Task.detached(priority: .utility) {
+                        TranscodeService.shared.probeProjection(for: url)
+                    }.value
+                    guard !Task.isCancelled else { return }
+                    currentVideoProjection = projection
                     currentVideoURL = url
                     currentMetadata = metadataService.readMetadata(from: url)
-                    log.info("Loaded video metadata for \(photo.fileName), isHDR=\(currentMetadata?.isHDRVideo ?? false)", source: "ViewModel")
+                    log.info("Loaded video metadata for \(photo.fileName), isHDR=\(currentMetadata?.isHDRVideo ?? false), projection=\(projection)", source: "ViewModel")
                 }
             }
             return
