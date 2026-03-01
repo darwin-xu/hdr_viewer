@@ -36,7 +36,11 @@ final class ThumbnailProvider: ObservableObject {
                     image = self.thumbnailViaFFmpeg(url: url, maxPixelSize: maxPixelSize)
                         ?? self.thumbnailViaAVAsset(url: url, maxPixelSize: maxPixelSize)
                 } else {
-                    image = self.thumbnailViaAVAsset(url: url, maxPixelSize: maxPixelSize)
+                    // For .insv, AVFoundation needs a .mp4 symlink;
+                    // fall back to ffmpeg if AVAsset still fails.
+                    let avURL = DualFisheyeReader.avFoundationURL(for: url)
+                    image = self.thumbnailViaAVAsset(url: avURL, maxPixelSize: maxPixelSize)
+                        ?? self.thumbnailViaFFmpeg(url: url, maxPixelSize: maxPixelSize)
                 }
             } else {
                 // Try CGImageSource thumbnail first (fast path)

@@ -84,6 +84,8 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
     // --- 360° panorama state ---
     private var panoramaRenderer: PanoramaRenderer?
     private var equirectTexture: MTLTexture?
+    /// In-memory dual-fisheye reader (replaces ffmpeg transcode for .insv).
+    private var dualFisheyeReader: DualFisheyeReader?
     /// Camera yaw in radians (positive = look right).
     var panoYaw: Float = 0
     /// Camera pitch in radians (positive = look up), clamped ±π/2.
@@ -158,7 +160,50 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         isPlaying = false
         hasRenderedContent = false
 
-        let asset = AVAsset(url: url)
+        // For .insv files, AVFoundation needs a symlink with .mp4 extension
+        // (the container is MP4 but the UTI is unrecognized).
+        let avURL = DualFisheyeReader.avFoundationURL(for: url)
+        let asset = AVAsset(url: avURL)
+        let videoTracks = asset.tracks(withMediaType: .video)
+
+        // ── Dual-stream .insv: in-memory decode (no temp file) ──────
+        let ext = url.pathExtension.lowercased()
+        if ext == "insv" && videoTracks.count >= 2 {
+            do {
+                let reader = try DualFisheyeReader(url: url)
+                dualFisheyeReader = reader
+
+                if let kd = knownDuration, kd > 0 {
+                    duration = kd
+                } else {
+                    let avDur = CMTimeGetSeconds(asset.duration)
+                    duration = (avDur.isFinite && avDur > 0) ? avDur : 0
+                }
+
+                // Audio-only AVPlayer (video tracks disabled to save resources)
+                let item = AVPlayerItem(asset: asset)
+                for track in item.tracks {
+                    if track.assetTrack?.mediaType == .video {
+                        track.isEnabled = false
+                    }
+                }
+                let p = AVPlayer(playerItem: item)
+                player = p
+
+                setupPlayerObservers(player: p, item: item)
+                reader.startDecoding()
+
+                containerView.updateDuration(duration)
+                containerView.updateTime(0)
+                containerView.updatePlayState(false)
+                return
+            } catch {
+                NSLog("[VideoPlayer] DualFisheyeReader failed: \(error); using standard path")
+                dualFisheyeReader = nil
+            }
+        }
+
+        // ── Standard AVPlayer path ──────────────────────────────────
         let item = AVPlayerItem(asset: asset)
 
         let attrs: [String: Any] = [
@@ -170,14 +215,12 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         videoOutput = output
 
         // Orientation from video track transform (for iPhone-shot portrait video)
-        if let track = asset.tracks(withMediaType: .video).first {
+        if let track = videoTracks.first {
             videoOrientation = Self.orientation(from: track.preferredTransform)
         } else {
             videoOrientation = .up
         }
 
-        // Use authoritative duration from ffprobe if available;
-        // otherwise fall back to AVAsset (may be 0 for progressive streams).
         if let kd = knownDuration, kd > 0 {
             duration = kd
         } else {
@@ -188,6 +231,16 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         let p = AVPlayer(playerItem: item)
         player = p
 
+        setupPlayerObservers(player: p, item: item)
+
+        containerView.updateDuration(duration)
+        containerView.updateTime(0)
+        containerView.updatePlayState(false)
+    }
+
+    /// Set up time / end-of-playback / duration observers on the player.
+    /// Shared by both the dual-fisheye and standard playback paths.
+    private func setupPlayerObservers(player p: AVPlayer, item: AVPlayerItem) {
         // KVO: update duration when AVPlayer resolves it (fragmented MP4
         // with empty_moov starts with unknown duration; AVPlayer fills it
         // in as it reads more fragments). Skip if we already have an
@@ -195,7 +248,6 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         durationObserver = item.observe(\.duration, options: [.new]) { [weak self] item, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
-                // Don't override an authoritative ffprobe duration
                 if let kd = self.knownDuration, kd > 0 { return }
                 let d = CMTimeGetSeconds(item.duration)
                 if d.isFinite && d > 0 && d != self.duration {
@@ -218,10 +270,6 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
             self?.isPlaying = false
             self?.containerView.updatePlayState(false)
         }
-
-        containerView.updateDuration(duration)
-        containerView.updateTime(0)
-        containerView.updatePlayState(false)
     }
 
     /// Update duration from an authoritative source (ffprobe).
@@ -242,6 +290,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
                 let current = CMTimeGetSeconds(item.currentTime())
                 if current >= duration - 0.1 {
                     player.seek(to: .zero)
+                    dualFisheyeReader?.seek(to: .zero)
                 }
             }
             player.play()
@@ -264,6 +313,7 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         guard let player, duration > 0 else { return }
         let target = CMTime(seconds: fraction * duration, preferredTimescale: 600)
         player.seek(to: target, toleranceBefore: .zero, toleranceAfter: .zero)
+        dualFisheyeReader?.seek(to: target)
     }
 
     /// Pause playback temporarily for seeking; remembers the playing state.
@@ -293,6 +343,8 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
         player?.pause()
         player = nil
         videoOutput = nil
+        dualFisheyeReader?.cancel()
+        dualFisheyeReader = nil
         hasRenderedContent = false
     }
 
@@ -306,7 +358,14 @@ final class VideoPlayerCoordinator: NSObject, MTKViewDelegate {
 
         // ── 1. Pull latest video frame ──────────────────────────────
         var gotNewFrame = false
-        if let output = videoOutput {
+        if let reader = dualFisheyeReader, let p = player {
+            // Dual-fisheye: composited frame from in-memory reader
+            let currentTime = p.currentTime()
+            if let composite = reader.compositeFrame(at: currentTime) {
+                lastCIImage = composite
+                gotNewFrame = true
+            }
+        } else if let output = videoOutput {
             let hostTime = CACurrentMediaTime()
             let itemTime = output.itemTime(forHostTime: hostTime)
             if output.hasNewPixelBuffer(forItemTime: itemTime),
