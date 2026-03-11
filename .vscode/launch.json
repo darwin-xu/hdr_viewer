@@ -1,0 +1,24 @@
+{
+    "configurations": [
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:hdr_viewer}",
+            "name": "Debug HDRViewer",
+            "target": "HDRViewer",
+            "configuration": "debug",
+            "preLaunchTask": "swift: Build Debug HDRViewer"
+        },
+        {
+            "type": "swift",
+            "request": "launch",
+            "args": [],
+            "cwd": "${workspaceFolder:hdr_viewer}",
+            "name": "Release HDRViewer",
+            "target": "HDRViewer",
+            "configuration": "release",
+            "preLaunchTask": "swift: Build Release HDRViewer"
+        }
+    ]
+}
